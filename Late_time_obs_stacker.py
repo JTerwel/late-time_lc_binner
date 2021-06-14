@@ -37,6 +37,9 @@ def main():
 		Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
 		Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
 		Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
 		Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
 
 	#Set optional parameters
@@ -48,7 +51,7 @@ def main():
 	nr_files = len(datafiles)
 	i = 0
 
-	#Make sure there sin't an overview.csv in saveloc before starting
+	#Make sure there isn't an overview.csv in saveloc before starting
 	(saveloc / 'overview.csv').unlink(missing_ok=True)
 
 	for f in datafiles: #Loop over all files
@@ -59,7 +62,7 @@ def main():
 			+ str(nr_files) + " | Total progress: [" + "%"*progress_bar\
 			 + " "*(40-progress_bar) + "]", end='\r')
 		
-		#Do stuff (unf)
+		#Do stuff
 		bin_late_time(f, saveloc, remove_sn_tails=remove_sn_tails)
 
 	print("\nDone")
@@ -78,21 +81,13 @@ class photom_obj:
 	obj (Path): Location of the object csv file to be binned
 	saveloc (Path): Location to save the results (new folder is made if needed)
 	late_time (int): Nr. of days after peak needed to be binned
-	g (DataFrame): g filter lc points
-	r (DataFrame): r filter lc points
-	i (DataFrame): i filter lc points
+	g (DataFrame): filter_data object for the ZTF_g filter
+	r (DataFrame): filter_data object for the ZTF_r filter
+	i (DataFrame): filter_data object for the ZTF_i filter
 	peak_mjd (float): SN peak light mjd
 	peak_mag (float): SN peak light magnitude
 	remove_sn_tails (bool): Fit & remove SN tail on bright SN?
 	trpt (float): Tail removal peak brightness treshold
-	fit_start_date (float): date relative to peak of start of SN tail fit
-	fit_end_date (float): date relative to peak of end of SN tail fit
-	g_a, r_a, i_a (float): slope value of line fit for each filter
-	g_b, r_b, i_b (float): intercect value of line fit for each filter
-	g_cov, r_cov, i_cov (matrix): Covariance matrices of the line fits
-	g_chi2red, r_chi2red, i_chi2red (float): reduced chi2 for the line fits
-	g_dof, r_dof, i_dof (float): degrees of freedom for the line fits
-	g_results, r_results, i_results (list): list of bin_results objects
 	'''
 
 	def __init__(self, obj_path, saveloc, late_time, remove_sn_tails, trpt):
@@ -108,31 +103,10 @@ class photom_obj:
 		'''
 		#Save input
 		self.obj_path = obj_path
-		self.saveloc = saveloc / obj_path.name[:-4]
+		self.saveloc = saveloc / obj_path.name[:-14]
 		self.late_time = late_time
 		self.remove_sn_tails = remove_sn_tails
 		self.trpt = trpt
-		#Save non input
-		self.fit_start_date = 50			#Need to play a bit more with these values
-		self.fit_end_date = 200
-		self.g_a = 0
-		self.g_b = 0
-		self.g_cov = np.zeros(shape=(2,2))
-		self.g_chi2red = 0
-		self.g_dof = 0
-		self.r_a = 0
-		self.r_b = 0
-		self.r_cov = np.zeros(shape=(2,2))
-		self.r_chi2red = 0
-		self.r_dof = 0
-		self.i_a = 0
-		self.i_b = 0
-		self.i_cov = np.zeros(shape=(2,2))
-		self.i_chi2red = 0
-		self.i_dof = 0
-		self.g_results = []
-		self.r_results = []
-		self.i_results = []
 		#Make sure the location exists & load the lc
 		self.saveloc.mkdir(exist_ok=True)
 		self.load_source()
@@ -152,14 +126,17 @@ class photom_obj:
 		data = data[data.data_hasnan==False]
 		
 		#Separate filters
-		self.g = data[data.obs_filter.str.contains('g')].reset_index(drop=True)
-		self.r = data[data.obs_filter.str.contains('r')].reset_index(drop=True)
-		self.i = data[data.obs_filter.str.contains('i')].reset_index(drop=True)
+		self.g = filter_data(data[
+			data.obs_filter.str.contains('g')].reset_index(drop=True), 'ZTF_g')
+		self.r = filter_data(data[
+			data.obs_filter.str.contains('r')].reset_index(drop=True), 'ZTF_r')
+		self.i = filter_data(data[
+			data.obs_filter.str.contains('i')].reset_index(drop=True), 'ZTF_i')
 
 		#Mention if not everything could be sorted for some reason
-		if (len(self.g)+len(self.r)+len(self.i)!=len(data)):
+		if (len(self.g.data)+len(self.r.data)+len(self.i.data)!=len(data)):
 			print("\n{} rows could not be sorted in g,r,i filter\n".format(
-				len(data)-len(self.g)-len(self.r)-len(self.i)))
+				len(data)-len(self.g.data)-len(self.r.data)-len(self.i.data)))
 
 		#Only use the best points to find the peak
 		self.find_peak_date(data[data.Fratio_err<np.mean(data.Fratio_err)])
@@ -192,6 +169,44 @@ class photom_obj:
 		self.peak_mag = data.mag[data.Fratio.idxmax()]
 		return
 
+class filter_data:
+	'''
+	Holds all data for a given filter
+
+	Attributes:
+	data (DataFrame): lc points
+	filter_name (string): Name of the filter used
+	fit_start (float): tail line fit starting date w.r.t. peak mjd
+	fit_end (float): tail line fit end date w.r.t. peak mjd
+	fit_zero (float): zeropoint w.r.t. which the fit is made, improves fit
+	a (float): tail line fit slope
+	b (float): tail line fit intersect
+	cov (matrix): covariance matrix of the fit
+	chi2red (float): reduced chi square of the fit
+	dof (float): degrees of freedom of the fit
+	results (list): list of bin_results objects
+	'''
+
+	def __init__(self, data, fname):
+		'''
+		Class constructor
+
+		Parameters:
+		data (DataFrame): lc points
+		fname (string): filter name
+		'''
+		self.data = data
+		self.filter_name = fname
+		self.fit_start = 80
+		self.fit_end = 200
+		self.fit_zero = self.fit_end - self.fit_start
+		self.a = 0
+		self.b = 0
+		self.cov = np.zeros(shape=(2,2))
+		self.chi2red = 0
+		self.dof = 0
+		self.results = []
+
 class bin_results:
 	'''
 	Bin & save given data together with the arguments used in the call
@@ -216,7 +231,7 @@ class bin_results:
 		4: Combine methods 2 & 3
 	result (DataFrame): The filled bins
 	'''
-	def __init__(self, data, late_start, obs_filter, binsize, start_phase, method=1):
+	def __init__(self, data, late_start, binsize, start_phase, method=1):
 		'''
 		Class constructor:
 
@@ -229,14 +244,14 @@ class bin_results:
 		method (int): How to place the bins (1st datapoint always in 1st bin)
 		'''
 		self.late_start = late_start
-		self.obs_filter = obs_filter
+		self.obs_filter = data.filter_name
 		self.binsize = binsize
 		self.phase = start_phase
 		if method not in [1, 2, 3, 4]:
 			print('\nMethod not recognized: {}\nUsing method 1'.format(method))
 			method = 1
 		self.method = method
-		self.result = self.bin_late_time(data)
+		self.result = self.bin_late_time(data.data)
 		return
 
 	def bin_late_time(self, data):
@@ -248,15 +263,6 @@ class bin_results:
 
 		Returns:
 		result (DataFrame): the resulting bins
-
-		DataFrame contents:
-			mjd_start, mjd_stop: left, right edge of the bin
-			binsize: mjd_stop - mjd_start
-			Fratio: weighted mean of the bins
-			Fratio_err: weighted error of Fratio
-			Fratio_std: binned points standard deviation (=err if nr_binned=1)
-			nr_binned: Amount of datapionts in the bin
-			significance: Ratio of bin mean and std_dev (<0 if Fratio <0)
 		'''
 		#Initialize DataFrame, bin counter, & 1st bin left side
 		result = pd.DataFrame(columns=['obs_filter', 'binsize', 'phase',
@@ -363,29 +369,26 @@ def bin_late_time(obj_path, saveloc, late_time=100, remove_sn_tails=False,
 	phases = [0, 0.25, 0.5, 0.75]
 	for size in sizes:
 		for phase in phases:
-			obj_data.g_results.append(bin_results(obj_data.g,
-				obj_data.peak_mjd+obj_data.late_time, 'ZTF_g', size, phase,
-				method=4))
-			obj_data.r_results.append(bin_results(obj_data.r,
-				obj_data.peak_mjd+obj_data.late_time, 'ZTF_r', size, phase,
-				method=4))
-			obj_data.i_results.append(bin_results(obj_data.i,
-				obj_data.peak_mjd+obj_data.late_time, 'ZTF_i', size, phase,
-				method=4))
+			obj_data.g.results.append(bin_results(obj_data.g,
+				obj_data.peak_mjd+obj_data.late_time, size, phase, method=4))
+			obj_data.r.results.append(bin_results(obj_data.r,
+				obj_data.peak_mjd+obj_data.late_time, size, phase, method=4))
+			obj_data.i.results.append(bin_results(obj_data.i,
+				obj_data.peak_mjd+obj_data.late_time, size, phase, method=4))
 
 	#Plot bin results
 	zpg = 4.880e7
 	zpr = 2.708e7
 	zpi = 4.880e7
-	plot_bin_results(obj_data.g, obj_data.g_results, obj_data.peak_mjd,
+	plot_bin_results(obj_data.g.data, obj_data.g.results, obj_data.peak_mjd,
 		obj_data.late_time, sizes, phases, 'ZTF_g', zpg, obj_data.saveloc)
-	plot_bin_results(obj_data.r, obj_data.r_results, obj_data.peak_mjd,
+	plot_bin_results(obj_data.r.data, obj_data.r.results, obj_data.peak_mjd,
 		obj_data.late_time, sizes, phases, 'ZTF_r', zpr, obj_data.saveloc)
-	plot_bin_results(obj_data.i, obj_data.i_results, obj_data.peak_mjd,
+	plot_bin_results(obj_data.i.data, obj_data.i.results, obj_data.peak_mjd,
 		obj_data.late_time, sizes, phases, 'ZTF_i', zpi, obj_data.saveloc)
 	
 	#Save results & select + record most promising bins
-	save_bins(obj_data.g_results, obj_data.r_results, obj_data.i_results,
+	save_bins(obj_data.g.results, obj_data.r.results, obj_data.i.results,
 		obj_data.saveloc)
 	save_settings(obj_data)
 
@@ -536,6 +539,7 @@ def plot_bin_results(data, result_list, peak_mjd, late_time, sizes, phases,
 	#Save & return
 	fig.tight_layout()
 	fig.savefig(saveloc / (filt+'_binned.png'))
+	plt.close()
 	return
 
 def poly(x, a, b):
@@ -549,57 +553,48 @@ def fit_sn_tails(obj_data):
 	Fit the SN tails with a straight line in mag space.
 	Only use points, no upper limits, and only if there are at least 5 points
 	Results (a, b, cov, chi2red, dof) are saved in the provided class
+	Make sure fitted tail extends down to set maglim(e.g. all points were used)
 
 	Parameters:
 	obj_data (photom_obj): object to fit
 	'''
-	#Shift time axis such that 0 is in the middle of the fitted region
-	shift = obj_data.peak_mjd + (obj_data.fit_end_date+obj_data.fit_start_date)/2
-	#fit g
-	data = obj_data.g[
-		(obj_data.g.obsmjd>obj_data.peak_mjd+obj_data.fit_start_date) &
-		(obj_data.g.obsmjd<obj_data.peak_mjd+obj_data.fit_end_date) &
-		(obj_data.g.mag<99)]
-	if len(data) > 4:
-		fit, cov = curve_fit(poly, data.obsmjd-shift, data.mag,
-			sigma=data.mag_err)
-		obj_data.g_a = fit[0]
-		obj_data.g_b = fit[1]
-		obj_data.g_cov = cov
-		obj_data.g_chi2red = sum(
-			(poly(data.obsmjd-shift, fit[0], fit[1])-data.mag)**2/data.mag_err)\
-			/ (len(data)-2)
-		obj_data.g_dof = len(data)-2
-	#fit r
-	data = obj_data.r[
-		(obj_data.r.obsmjd>obj_data.peak_mjd+obj_data.fit_start_date) &
-		(obj_data.r.obsmjd<obj_data.peak_mjd+obj_data.fit_end_date) &
-		(obj_data.r.mag<99)]
-	if len(data) > 4:
-		fit, cov = curve_fit(poly, data.obsmjd-shift, data.mag,
-			sigma=data.mag_err)
-		obj_data.r_a = fit[0]
-		obj_data.r_b = fit[1]
-		obj_data.r_cov = cov
-		obj_data.r_chi2red = sum(
-			(poly(data.obsmjd-shift, fit[0], fit[1])-data.mag)**2/data.mag_err)\
-			/ (len(data)-2)
-		obj_data.r_dof = len(data)-2
-	#fit i
-	data = obj_data.i[
-		(obj_data.i.obsmjd>obj_data.peak_mjd+obj_data.fit_start_date) &
-		(obj_data.i.obsmjd<obj_data.peak_mjd+obj_data.fit_end_date)&
-		(obj_data.i.mag<99)]
-	if len(data) > 4:
-		fit, cov = curve_fit(poly, data.obsmjd-shift, data.mag,
-			sigma=data.mag_err)
-		obj_data.i_a = fit[0]
-		obj_data.i_b = fit[1]
-		obj_data.i_cov = cov
-		obj_data.i_chi2red = sum(
-			(poly(data.obsmjd-shift, fit[0], fit[1])-data.mag)**2/data.mag_err)\
-			/ (len(data)-2)
-		obj_data.i_dof = len(data)-2
+	for obj in [obj_data.g, obj_data.r, obj_data.i]:
+		counter = 0		#Avoid infinite looping
+		while counter < 10:
+			#Find points to use in the fit
+			obj.fit_zero = obj_data.peak_mjd + (obj.fit_end+obj.fit_start)/2
+			data_to_fit = obj.data[
+				(obj.data.obsmjd>obj_data.peak_mjd+obj.fit_start) &
+				(obj.data.obsmjd<obj_data.peak_mjd+obj.fit_end) &
+				(obj.data.mag<99)]
+
+			#Fit tail if it has at least 5 points, else go with last estimate
+			if len(data_to_fit) > 4:
+				[obj.a, obj.b], obj.cov = curve_fit(poly,
+					data_to_fit.obsmjd-obj.fit_zero, data_to_fit.mag,
+					sigma=data_to_fit.mag_err)
+				obj.chi2red = sum(
+					(poly(data_to_fit.obsmjd-obj.fit_zero, obj.a, obj.b)\
+					-data_to_fit.mag)**2/data_to_fit.mag_err)\
+					/ (len(data_to_fit)-2)
+				obj.dof = len(data_to_fit)-2
+			else:
+				break
+
+			#Find where the model crosses the maglim
+			mjdlim = ((22-obj.b) / obj.a) + obj.fit_zero
+
+			#Are there observations between the current & new fit_end mjd?
+			if len(obj.data.obsmjd[
+					((obj.data.obsmjd>obj_data.peak_mjd+obj.fit_end) &
+					(obj.data.obsmjd<mjdlim)) | ((obj.data.obsmjd>mjdlim) &
+					(obj.data.obsmjd<obj_data.peak_mjd+obj.fit_end))]) != 0:
+				#y: update fit_end & counter
+				obj.fit_end = mjdlim - obj_data.peak_mjd
+				counter += 1
+			else:
+				#n: found the final model, break out of the while loop
+				break
 	return
 
 def rm_fitted_tail(obj_data):
@@ -607,45 +602,14 @@ def rm_fitted_tail(obj_data):
 	Remove the SN tails by subtracting the fitted line in flux space.
 	line fit params are saved in the provided class
 
-	Basic steps:
-	-calc  model for all late time obs (+ errors)
-	-rm obs where nothing will be subtracted (t>end date | mag>22)
-	-record last date with subtractions
-	-convert model mags to flux space (+ errors)
-	-flux -= model flux (also update flux errors)
-
 	Parameters:
 	obj_data (photom_obj): object to fit
 	'''
-	#fit zeropoint
-	fit_zero = obj_data.peak_mjd\
-			+ (obj_data.fit_end_date+obj_data.fit_start_date)/2
-
-	#Remove the model from the observations for each filter
-	#g
-	indices, mod_y, mod_dy = frat_to_remove(
-		obj_data.g.obsmjd[obj_data.g.obsmjd>obj_data.peak_mjd+obj_data.late_time],
-		obj_data.g_a, obj_data.g_b, obj_data.g_cov, obj_data.g_chi2red,
-		obj_data.g_dof, fit_zero)
-	obj_data.g.loc[indices, 'Fratio'] -= mod_y
-	obj_data.g.loc[indices, 'Fratio_err'] = np.sqrt(
-		obj_data.g.loc[indices, 'Fratio_err'].values**2 + mod_dy**2)
-	#r
-	indices, mod_y, mod_dy = frat_to_remove(
-		obj_data.r.obsmjd[obj_data.r.obsmjd>obj_data.peak_mjd+obj_data.late_time],
-		obj_data.r_a, obj_data.r_b, obj_data.r_cov, obj_data.r_chi2red,
-		obj_data.r_dof, fit_zero)
-	obj_data.r.loc[indices, 'Fratio'] -= mod_y
-	obj_data.r.loc[indices, 'Fratio_err'] = np.sqrt(
-		obj_data.r.loc[indices, 'Fratio_err']**2 + mod_dy**2)
-	#i
-	indices, mod_y, mod_dy = frat_to_remove(
-		obj_data.i.obsmjd[obj_data.i.obsmjd>obj_data.peak_mjd+obj_data.late_time],
-		obj_data.i_a, obj_data.i_b, obj_data.i_cov, obj_data.i_chi2red,
-		obj_data.i_dof, fit_zero)
-	obj_data.i.loc[indices, 'Fratio'] -= mod_y
-	obj_data.i.loc[indices, 'Fratio_err'] = np.sqrt(
-		obj_data.i.loc[indices, 'Fratio_err']**2 + mod_dy**2)
+	for obj in [obj_data.g, obj_data.r, obj_data.i]:
+		indices, mod_y, mod_dy = frat_to_remove(obj, obj_data.peak_mjd)
+		obj.data.loc[indices, 'Fratio'] -= mod_y
+		obj.data.loc[indices, 'Fratio_err'] = np.sqrt(mod_dy**2 +
+			obj.data.loc[indices, 'Fratio_err'].values**2)
 	return
 
 def save_tails(obj_data):
@@ -658,59 +622,45 @@ def save_tails(obj_data):
 	#Put all data in a DataFrame
 	data = pd.DataFrame(columns=['obs_filter', 'a', 'b', 'Caa', 'Cab', 'Cba',
 		'Cbb', 'chi2red', 'dof', 'fit_start_mjd', 'fit_end_mjd', 'fit_zero'])
-	data.loc[0] = ['ZTF_g', obj_data.g_a, obj_data.g_b, obj_data.g_cov[0,0],
-		obj_data.g_cov[0,1], obj_data.g_cov[1,0], obj_data.g_cov[1,1],
-		obj_data.g_chi2red, obj_data.g_dof,
-		obj_data.fit_start_date+obj_data.peak_mjd,
-		obj_data.fit_end_date+obj_data.peak_mjd,
-		obj_data.peak_mjd + (obj_data.fit_end_date+obj_data.fit_start_date)/2]
-	data.loc[1] = ['ZTF_r', obj_data.r_a, obj_data.r_b, obj_data.r_cov[0,0],
-		obj_data.r_cov[0,1], obj_data.r_cov[1,0], obj_data.r_cov[1,1],
-		obj_data.r_chi2red, obj_data.r_dof,
-		obj_data.fit_start_date+obj_data.peak_mjd,
-		obj_data.fit_end_date+obj_data.peak_mjd,
-		obj_data.peak_mjd + (obj_data.fit_end_date+obj_data.fit_start_date)/2]
-	data.loc[2] = ['ZTF_i', obj_data.i_a, obj_data.i_b, obj_data.i_cov[0,0],
-		obj_data.i_cov[0,1], obj_data.i_cov[1,0], obj_data.i_cov[1,1],
-		obj_data.i_chi2red, obj_data.i_dof,
-		obj_data.fit_start_date+obj_data.peak_mjd,
-		obj_data.fit_end_date+obj_data.peak_mjd,
-		obj_data.peak_mjd + (obj_data.fit_end_date+obj_data.fit_start_date)/2]
+	i=0
+	for obj in [obj_data.g, obj_data.r, obj_data.i]:
+		data.loc[i] = [obj.filter_name, obj.a, obj.b, obj.cov[0,0],
+			obj.cov[0,1], obj.cov[1,0], obj.cov[1,1], obj.chi2red, obj.dof,
+			obj.fit_start+obj_data.peak_mjd, obj.fit_end+obj_data.peak_mjd,
+			obj.fit_zero]
+		i += 1
 
 	#Save DataFrame & return
 	data.to_csv(obj_data.saveloc/'tail_fits.csv', index=False)
 	return
 
-def frat_to_remove(dates, a, b, cov, chi2red, dof, fit_zero):
+def frat_to_remove(obj, peak_mjd):
 	'''
 	Calculate the fratio values that have to be removed
 
 	Paramters:
-	dates (DataFrame): indexed obsmjd
-	a (float): fit slope
-	b (float): fit intersect
-	cov (matrix): covariance matrix
-	chi2red (float): reduced chi2
-	dof (float): fit degrees of freedom
-	fit_zero (float): fit zeropoint
-	zp (float): flux zeropoint
+	obj(filter_data): data from which the tail is removed
+	peak_mjd (float): mjd of SN peak light
 
 	Returns:
 	indices (array): Indices of the observations to subtract
 	mod_y (array): model Fratio
 	mod_dy (array): error on mod_y
 	'''
-	#Calc model y in mag space & select points where the subtraction will happen
-	mod_y = poly(dates-fit_zero, a, b)
-	indices = mod_y[mod_y<22].index
-	mod_y = mod_y[indices].values
+	#Select the region on which the model is fitted
+	indices = obj.data[(obj.data.obsmjd>peak_mjd+obj.fit_start) &
+		(obj.data.obsmjd<peak_mjd+obj.fit_end)].index
+	dates = obj.data.obsmjd.loc[indices]
+
+	#Calc the model values in the selected region
+	mod_y = poly(dates-obj.fit_zero, obj.a, obj.b).values
 
 	#Calculate corresponding errors in mag space
-	mod_dy = condfidence_band(dates[indices]-fit_zero, cov, chi2red, dof,
+	mod_dy = condfidence_band(dates-obj.fit_zero, obj.cov, obj.chi2red, obj.dof,
 		1).values
 	
 	#Convert to Fratio before returning
-	if ((a==0) & (b==0)): #No fit was actually performed, mod_y & mod_dy are 0
+	if ((obj.a==0) & (obj.b==0)): #No fit was actually performed, mod_y & mod_dy are 0
 		mod_y = np.zeros_like(mod_y)
 		mod_dy = np.zeros_like(mod_dy)
 	else:
@@ -727,71 +677,43 @@ def plot_lc(obj_data):
 	obj_data (photom_obj): object to plot
 	'''
 	#Initiate plot, set ax labels & fig titles, and set ax limits
-	fig, (ax_g, ax_r, ax_i) = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-	ax_g.set_ylabel('Magnitude')
-	ax_g.set_ylim(23, 15)
-	ax_g.set_title('ZTF_g')
-	ax_r.set_ylabel('Magnitude')
-	ax_r.set_ylim(23, 15)
-	ax_r.set_title('ZTF_r')
-	ax_i.set_xlabel('Date')
-	ax_i.set_ylabel('Magnitude')
-	ax_i.set_ylim(23, 15)
-	ax_i.set_title('ZTF_i')
+	fig, axs = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+	to_plot = [obj_data.g, obj_data.r, obj_data.i]
+	fmts = ['.g', '.r', '.y']
 
-	#Plot lc data, peak date & start of late time observations
-	ax_g.errorbar(obj_data.g.obsmjd[obj_data.g.mag<99],
-		obj_data.g.mag[obj_data.g.mag<99],
-		yerr=obj_data.g.mag_err[obj_data.g.mag<99], fmt='.g')
-	ax_g.scatter(obj_data.g.obsmjd[obj_data.g.mag==99],
-		obj_data.g.upper_limit[obj_data.g.mag==99], marker='v', color='k')
-	ax_g.axvline(obj_data.peak_mjd, ls='--', color='gray', alpha=0.6)
-	ax_g.axvline(obj_data.peak_mjd+obj_data.late_time, ls='--', color='gray',
-		alpha=0.6)
+	axs[2].set_xlabel('Date')
+	for i in range(3):
+		axs[i].set_ylabel('Magnitude')
+		axs[i].set_ylim(23, 15)
+		axs[i].set_title(to_plot[i].filter_name)
+		axs[i].grid(color='gray', alpha=0.4)
 
-	ax_r.errorbar(obj_data.r.obsmjd[obj_data.r.mag<99],
-		obj_data.r.mag[obj_data.r.mag<99],
-		yerr=obj_data.r.mag_err[obj_data.r.mag<99], fmt='.r')
-	ax_r.scatter(obj_data.r.obsmjd[obj_data.r.mag==99],
-		obj_data.r.upper_limit[obj_data.r.mag==99], marker='v', color='k')
-	ax_r.axvline(obj_data.peak_mjd, ls='--', color='gray', alpha=0.6)
-	ax_r.axvline(obj_data.peak_mjd+obj_data.late_time, ls='--', color='gray',
-		alpha=0.6)
-	
-	ax_i.errorbar(obj_data.i.obsmjd[obj_data.i.mag<99],
-		obj_data.i.mag[obj_data.i.mag<99],
-		yerr=obj_data.i.mag_err[obj_data.i.mag<99], fmt='.y')
-	ax_i.scatter(obj_data.i.obsmjd[obj_data.i.mag==99],
-		obj_data.i.upper_limit[obj_data.i.mag==99], marker='v', color='k')
-	ax_i.axvline(obj_data.peak_mjd, ls='--', color='gray', alpha=0.6)
-	ax_i.axvline(obj_data.peak_mjd+obj_data.late_time, ls='--', color='gray',
-		alpha=0.6)
+		#Plot the lc data, peak date & start of late time observations
+		axs[i].errorbar(to_plot[i].data.obsmjd[to_plot[i].data.mag<99],
+			to_plot[i].data.mag[to_plot[i].data.mag<99],
+			yerr=to_plot[i].data.mag_err[to_plot[i].data.mag<99], fmt=fmts[i])
+		axs[i].scatter(to_plot[i].data.obsmjd[to_plot[i].data.mag==99],
+			to_plot[i].data.upper_limit[to_plot[i].data.mag==99], marker='v',
+			color='k')
+		axs[i].axvline(obj_data.peak_mjd, ls='--', color='gray', alpha=0.6)
+		axs[i].axvline(obj_data.peak_mjd+obj_data.late_time, ls='--',
+			color='gray', alpha=0.6)
 
-	#Plot line fit if it is there
-	if ((obj_data.peak_mag < obj_data.trpt) & (obj_data.remove_sn_tails)):
-		dates = obj_data.peak_mjd\
-			+ np.array([obj_data.fit_start_date, obj_data.fit_end_date])
-		fit_zero = obj_data.peak_mjd\
-			+ (obj_data.fit_end_date+obj_data.fit_start_date)/2
-		g_y = poly(dates-fit_zero, obj_data.g_a, obj_data.g_b)
-		g_dy = condfidence_band(dates-fit_zero, obj_data.g_cov,
-			obj_data.g_chi2red, obj_data.g_dof, 3)
-		ax_g.plot(dates, g_y, 'm')
-		ax_g.fill_between(dates, g_y-g_dy, g_y+g_dy, color='gray', alpha=0.6)
-		r_y = poly(dates-fit_zero, obj_data.r_a, obj_data.r_b)
-		r_dy = condfidence_band(dates-fit_zero, obj_data.r_cov,
-			obj_data.r_chi2red, obj_data.r_dof, 3)
-		ax_r.plot(dates, r_y, 'm')
-		ax_r.fill_between(dates, r_y-r_dy, r_y+r_dy, color='gray', alpha=0.6)
-		i_y = poly(dates-fit_zero, obj_data.i_a, obj_data.i_b)
-		i_dy = condfidence_band(dates-fit_zero, obj_data.i_cov,
-			obj_data.i_chi2red, obj_data.i_dof, 3)
-		ax_i.plot(dates, i_y, 'm')
-		ax_i.fill_between(dates, i_y-i_dy, i_y+i_dy, color='gray', alpha=0.6)
+		#Plot line fit if it is in there
+		if ((obj_data.peak_mag < obj_data.trpt)&(obj_data.remove_sn_tails)):
+			fit_x = np.linspace(to_plot[i].fit_start+obj_data.peak_mjd,
+				to_plot[i].fit_end+obj_data.peak_mjd, 100)
+			fit_y = poly(fit_x-to_plot[i].fit_zero, to_plot[i].a, to_plot[i].b)
+			fit_dy = condfidence_band(fit_x-to_plot[i].fit_zero, to_plot[i].cov,
+				to_plot[i].chi2red, to_plot[i].dof, 3)
+			axs[i].plot(fit_x, fit_y, 'm')
+			axs[i].fill_between(fit_x, fit_y-fit_dy, fit_y+fit_dy, color='gray',
+				alpha=0.6)
 
 	#Save figure
 	fig.tight_layout()
 	fig.savefig(obj_data.saveloc / 'orig_lc.png')
+	plt.close()
 	return
 
 def condfidence_band(x, cov, chi2red, dof, sigma):
