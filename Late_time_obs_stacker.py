@@ -15,6 +15,9 @@ from astropy.time import Time
 from scipy.optimize import curve_fit
 from scipy.stats import t
 from scipy.special import erf
+import time	#testing only
+import tracemalloc #testing only
+import gc #testing
 
 def main():
 	'''
@@ -25,22 +28,22 @@ def main():
 	object), and control the progress bar.
 	'''
 	#Set location where the results will be saved
-	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia")			#SN Ia
-	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_sub")		#SN Ia sub
-	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/version_test_results")	#Testing
+	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_new_stacker")			#SN Ia
+	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_sub_new_stacker")		#SN Ia sub
+	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/version_test_results")		#Testing
 
 	#Set the location of the object csv files and list them
 	dataloc = getenv("ZTFDATA") + '/marshal'
 	#datafiles = list(Path(dataloc, 'SN_Ia').rglob('*.csv'))				#SN Ia
-	#datafiles = list(Path(dataloc, 'SN_Ia_sub').rglob('*.csv'))			#SN Ia sub
-	datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
+	datafiles = list(Path(dataloc, 'SN_Ia_sub').rglob('*.csv'))			#SN Ia sub
+	#datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
 
 	#Set optional parameters
 	#late_time = 100
@@ -53,7 +56,8 @@ def main():
 
 	#Make sure there isn't an overview.csv in saveloc before starting
 	(saveloc / 'overview.csv').unlink(missing_ok=True)
-
+	times = [] #for testing only
+	#tracemalloc.start() #testing only
 	for f in datafiles: #Loop over all files
 		#Update progress bar
 		i += 1
@@ -63,9 +67,20 @@ def main():
 			 + " "*(40-progress_bar) + "]", end='\r')
 		
 		#Do stuff
+		start = time.time() #testing only
 		bin_late_time(f, saveloc, remove_sn_tails=remove_sn_tails)
+		end = time.time() #testing only
+		times.append(end-start) #testing only
+		gc.collect() #Collect garbage created in this loop
 
 	print("\nDone")
+	#snapshot = tracemalloc.take_snapshot() #testing only
+	#top_stats = snapshot.statistics('lineno') #testing only
+	#for stat in top_stats[:10]: #testing only
+	#	print(stat) #testing only
+	plt.plot(times) #testing only
+	plt.ylabel('time spent (s)') #testing only
+	plt.show() #testing only
 	return
 
 
@@ -539,6 +554,8 @@ def plot_bin_results(data, result_list, peak_mjd, late_time, sizes, phases,
 	#Save & return
 	fig.tight_layout()
 	fig.savefig(saveloc / (filt+'_binned.png'))
+	plt.cla()	#For testing
+	plt.clf()	#For testing
 	plt.close()
 	return
 
@@ -713,6 +730,8 @@ def plot_lc(obj_data):
 	#Save figure
 	fig.tight_layout()
 	fig.savefig(obj_data.saveloc / 'orig_lc.png')
+	plt.cla()	#For testing
+	plt.clf()	#For testing
 	plt.close()
 	return
 
