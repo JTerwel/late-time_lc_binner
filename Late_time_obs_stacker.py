@@ -9,15 +9,14 @@ Date: 26-04-21
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import multiprocessing as mp
 from os import getenv
 from pathlib import Path
 from astropy.time import Time
 from scipy.optimize import curve_fit
 from scipy.stats import t
 from scipy.special import erf
-import time	#testing only
-import tracemalloc #testing only
-import gc #testing
+from tqdm import tqdm
 
 def main():
 	'''
@@ -35,52 +34,32 @@ def main():
 	#Set the location of the object csv files and list them
 	dataloc = getenv("ZTFDATA") + '/marshal'
 	#datafiles = list(Path(dataloc, 'SN_Ia').rglob('*.csv'))				#SN Ia
-	datafiles = list(Path(dataloc, 'SN_Ia_sub').rglob('*.csv'))			#SN Ia sub
-	#datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
+	#datafiles = list(Path(dataloc, 'SN_Ia_sub').rglob('*.csv'))			#SN Ia sub
+	datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
+		Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
 
-	#Set optional parameters
-	#late_time = 100
+	#Set optional parameters & make the arg_list
+	late_time = 100
 	remove_sn_tails = True
-	#tail_removal_peak_tresh = 18
-
-	#Initiate progress bar
-	nr_files = len(datafiles)
-	i = 0
+	tail_removal_peak_tresh = 18
+	make_plots = True
+	args = [[f, saveloc, late_time, remove_sn_tails, tail_removal_peak_tresh,
+		make_plots] for f in datafiles]
 
 	#Make sure there isn't an overview.csv in saveloc before starting
 	(saveloc / 'overview.csv').unlink(missing_ok=True)
-	times = [] #for testing only
-	#tracemalloc.start() #testing only
-	for f in datafiles: #Loop over all files
-		#Update progress bar
-		i += 1
-		progress_bar = (int(np.floor(40*i/nr_files)))
-		print(" "*50 + "Working on " + f.name[:-4] + " | " + str(i) + "/"\
-			+ str(nr_files) + " | Total progress: [" + "%"*progress_bar\
-			 + " "*(40-progress_bar) + "]", end='\r')
-		
-		#Do stuff
-		start = time.time() #testing only
-		bin_late_time(f, saveloc, remove_sn_tails=remove_sn_tails)
-		end = time.time() #testing only
-		times.append(end-start) #testing only
-		gc.collect() #Collect garbage created in this loop
 
-	print("\nDone")
-	#snapshot = tracemalloc.take_snapshot() #testing only
-	#top_stats = snapshot.statistics('lineno') #testing only
-	#for stat in top_stats[:10]: #testing only
-	#	print(stat) #testing only
-	plt.plot(times) #testing only
-	plt.ylabel('time spent (s)') #testing only
-	plt.show() #testing only
+	#use each cpu core separately & keep track of progress
+	pool = mp.Pool(mp.cpu_count())
+	list(tqdm(pool.imap_unordered(bin_late_time, args), total=len(datafiles)))
+	pool.close()
+	pool.join()
 	return
 
 
@@ -111,6 +90,7 @@ class photom_obj:
 
 		Paramters:
 		obj_path (Path): Location of the object csv file to be binned
+		name (string): Name of the object
 		saveloc (Path): Location to save the results
 		late_time (int): Nr. of days after peak needed to be binned
 		remove_sn_tails (bool): Fit & remove SN tail on bright SN?
@@ -118,6 +98,7 @@ class photom_obj:
 		'''
 		#Save input
 		self.obj_path = obj_path
+		self.name = obj_path.name[:-14]
 		self.saveloc = saveloc / obj_path.name[:-14]
 		self.late_time = late_time
 		self.remove_sn_tails = remove_sn_tails
@@ -178,7 +159,8 @@ class photom_obj:
 
 			#Not enough points to determine peak realness? Use last guess
 			if len(data)<2:
-				print("Could not verify peak_light, using last guess")
+				print("{}: Could not verify peak_light, using last guess".format(
+					self.name))
 				break
 		self.peak_mjd = peak_light
 		self.peak_mag = data.mag[data.Fratio.idxmax()]
@@ -263,7 +245,7 @@ class bin_results:
 		self.binsize = binsize
 		self.phase = start_phase
 		if method not in [1, 2, 3, 4]:
-			print('\nMethod not recognized: {}\nUsing method 1'.format(method))
+			print('Method not recognized: {}\nUsing method 1'.format(method))
 			method = 1
 		self.method = method
 		self.result = self.bin_late_time(data.data)
@@ -350,21 +332,23 @@ class bin_results:
 #| Main functions |
 #*----------------*
 
-def bin_late_time(obj_path, saveloc, late_time=100, remove_sn_tails=False,
-		trpt=18):
+def bin_late_time(args):
 	'''
 	Master function for binning late time observations.
 
 	Parameters:
+	args(list): list of the arguments, contains the following:
 	obj (Path): Location of the object csv file to be binned
 	saveloc (Path): Location to save the results
 	late_time (int): Nr. of days after peak needed to be binned, default 100
 	remove_sn_tails (bool): Fit & remove SN tail on bright SN? default False
 	trpt (float): If peak brightness < trpt, no tail is removed, default 18
+	make_plots (bool): make plots of the resulting bins, default False
 
 	Returns:
 	'''
-	#Load object
+	#Unpack args & load object
+	obj_path, saveloc, late_time, remove_sn_tails, trpt, make_plots = args
 	obj_data = photom_obj(obj_path, saveloc, late_time, remove_sn_tails, trpt)
 
 	#Fit end of SN tail & remove it from interfering with the late time binning
@@ -376,7 +360,8 @@ def bin_late_time(obj_path, saveloc, late_time=100, remove_sn_tails=False,
 		obj_data.remove_sn_tails = False
 
 	#Plot original lc in each filter with fit in mag space
-	plot_lc(obj_data)
+	if make_plots:
+		plot_lc(obj_data)
 
 	#Start of the binning procedure, for each filter use different bin sizes &
 	#different start phases: 1st bin at late_time - size * phase days after peak
@@ -392,15 +377,16 @@ def bin_late_time(obj_path, saveloc, late_time=100, remove_sn_tails=False,
 				obj_data.peak_mjd+obj_data.late_time, size, phase, method=4))
 
 	#Plot bin results
-	zpg = 4.880e7
-	zpr = 2.708e7
-	zpi = 4.880e7
-	plot_bin_results(obj_data.g.data, obj_data.g.results, obj_data.peak_mjd,
-		obj_data.late_time, sizes, phases, 'ZTF_g', zpg, obj_data.saveloc)
-	plot_bin_results(obj_data.r.data, obj_data.r.results, obj_data.peak_mjd,
-		obj_data.late_time, sizes, phases, 'ZTF_r', zpr, obj_data.saveloc)
-	plot_bin_results(obj_data.i.data, obj_data.i.results, obj_data.peak_mjd,
-		obj_data.late_time, sizes, phases, 'ZTF_i', zpi, obj_data.saveloc)
+	if make_plots:
+		zpg = 4.880e7
+		zpr = 2.708e7
+		zpi = 4.880e7
+		plot_bin_results(obj_data.g.data, obj_data.g.results, obj_data.peak_mjd,
+			obj_data.late_time, sizes, phases, 'ZTF_g', zpg, obj_data.saveloc)
+		plot_bin_results(obj_data.r.data, obj_data.r.results, obj_data.peak_mjd,
+			obj_data.late_time, sizes, phases, 'ZTF_r', zpr, obj_data.saveloc)
+		plot_bin_results(obj_data.i.data, obj_data.i.results, obj_data.peak_mjd,
+			obj_data.late_time, sizes, phases, 'ZTF_i', zpi, obj_data.saveloc)
 	
 	#Save results & select + record most promising bins
 	save_bins(obj_data.g.results, obj_data.r.results, obj_data.i.results,
@@ -488,7 +474,7 @@ def plot_bin_results(data, result_list, peak_mjd, late_time, sizes, phases,
 	'''
 	#First check if nr. bin_results objects = combinations of size & phase
 	if len(result_list) != len(sizes) * len(phases):
-		print('\nWarning: Number of bin_results does not match all size, phase '\
+		print('Warning: Number of bin_results does not match all size, phase '\
 			'combinations!\nAs a result of this, some subplots may be empty. '\
 			'(filter = '+filt+')')
 
@@ -554,8 +540,8 @@ def plot_bin_results(data, result_list, peak_mjd, late_time, sizes, phases,
 	#Save & return
 	fig.tight_layout()
 	fig.savefig(saveloc / (filt+'_binned.png'))
-	plt.cla()	#For testing
-	plt.clf()	#For testing
+	plt.cla()
+	plt.clf()
 	plt.close()
 	return
 
@@ -610,7 +596,7 @@ def fit_sn_tails(obj_data):
 				obj.fit_end = mjdlim - obj_data.peak_mjd
 				counter += 1
 			else:
-				#n: found the final model, break out of the while loop
+				#found the final model, break out of the while loop
 				break
 	return
 
@@ -730,8 +716,8 @@ def plot_lc(obj_data):
 	#Save figure
 	fig.tight_layout()
 	fig.savefig(obj_data.saveloc / 'orig_lc.png')
-	plt.cla()	#For testing
-	plt.clf()	#For testing
+	plt.cla()
+	plt.clf()
 	plt.close()
 	return
 
