@@ -27,28 +27,28 @@ def main():
 	object), and control the progress bar.
 	'''
 	#Set location where the results will be saved
-	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_new_stacker")			#SN Ia
+	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_new_stacker")			#SN Ia
 	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_sub_new_stacker")		#SN Ia sub
-	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/version_test_results")		#Testing
+	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/version_test_results")		#Testing
 
 	#Set the location of the object csv files and list them
 	dataloc = getenv("ZTFDATA") + '/marshal'
-	#datafiles = list(Path(dataloc, 'SN_Ia').rglob('*.csv'))				#SN Ia
+	datafiles = list(Path(dataloc, 'SN_Ia').rglob('*.csv'))				#SN Ia
 	#datafiles = list(Path(dataloc, 'SN_Ia_sub').rglob('*.csv'))			#SN Ia sub
-	datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
-		Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
+	#datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
+	#	Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
 
 	#Set optional parameters & make the arg_list
 	late_time = 100
 	remove_sn_tails = True
 	tail_removal_peak_tresh = 18
-	make_plots = True
+	make_plots = False
 	args = [[f, saveloc, late_time, remove_sn_tails, tail_removal_peak_tresh,
 		make_plots] for f in datafiles]
 
@@ -390,12 +390,12 @@ def bin_late_time(args):
 	
 	#Save results & select + record most promising bins
 	save_bins(obj_data.g.results, obj_data.r.results, obj_data.i.results,
-		obj_data.saveloc)
+		sizes, obj_data.saveloc)
 	save_settings(obj_data)
 
 	return
 
-def save_bins(g_bins, r_bins, i_bins, saveloc):
+def save_bins(g_bins, r_bins, i_bins, binsizes, saveloc):
 	'''
 	Save the binning result for each filter, binsize, & phase
 
@@ -407,6 +407,7 @@ def save_bins(g_bins, r_bins, i_bins, saveloc):
 
 	Parameters:
 	g_bins, r_bins, i_bins(list): list of bin_results objects for g, r, i filter
+	binsizes (list): binsizes used
 	saveloc (Path): Location to save the result.
 	'''
 	df_list = [obj.result for obj in g_bins + r_bins + i_bins]
@@ -419,19 +420,23 @@ def save_bins(g_bins, r_bins, i_bins, saveloc):
 		'Fratio_err', 'Fratio_std', 'significance']
 	overview_vals = [saveloc.name]
 	overview_cols = ['obj_name']
-	for i in all_bins.obs_filter.unique():
-		for j in all_bins.binsize.unique():
+	#for i in all_bins.obs_filter.unique():
+	for i in ['ZTF_g', 'ZTF_r', 'ZTF_i']:
+		for j in binsizes:
 			overview_cols += [k + '_{}_bin{}'.format(i, j) for k in vals_to_save]
 			this_set = all_bins[(all_bins.obs_filter==i) & (all_bins.binsize==j)]
-			best_bin = this_set[
-				this_set.significance==this_set.significance.max()].iloc[0]
-			if best_bin.significance > 0:
-				overview_vals += [best_bin.phase, best_bin.mjd_start,
-					best_bin.mjd_stop, best_bin.nr_binned, best_bin.Fratio,
-					best_bin.Fratio_err, best_bin.Fratio_std,
-					best_bin.significance]
-			else: #Nothing interesting found
+			if this_set.empty: #No bins with this filter and binsize exist
 				overview_vals += [0,0,0,0,0,0,0,0]
+			else:
+				best_bin = this_set[
+					this_set.significance==this_set.significance.max()].iloc[0]
+				if best_bin.significance > 0:
+					overview_vals += [best_bin.phase, best_bin.mjd_start,
+						best_bin.mjd_stop, best_bin.nr_binned, best_bin.Fratio,
+						best_bin.Fratio_err, best_bin.Fratio_std,
+						best_bin.significance]
+				else: #Nothing interesting found
+					overview_vals += [0,0,0,0,0,0,0,0]
 	best_bins = pd.DataFrame(columns=overview_cols)
 	best_bins.loc[0] = overview_vals
 
