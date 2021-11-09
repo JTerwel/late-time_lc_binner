@@ -264,7 +264,7 @@ class bin_results:
 		#Initialize DataFrame, bin counter, & 1st bin left side
 		result = pd.DataFrame(columns=['obs_filter', 'binsize', 'phase',
 			'method', 'mjd_start', 'mjd_stop', 'Fratio', 'Fratio_err',
-			'Fratio_std', 'nr_binned', 'significance'])
+			'Fratio_std', 'nr_binned', 'significance', 'Fratio_std_old'])
 		counter = 0
 		newbin_start =  data.obsmjd[data.obsmjd>=self.late_start].min()\
 			- self.binsize*self.phase
@@ -295,8 +295,11 @@ class bin_results:
 				fratio_err = 1/np.sqrt(sum(weights))
 				if len(thisbin)==1:
 					std_dev = thisbin.Fratio_err.max()
+					std_dev_old = std_dev
 				else:
-					std_dev = thisbin.Fratio.std()
+					std_dev_old = thisbin.Fratio.std()
+					std_dev = np.sqrt(sum(weights * (thisbin.Fratio-fratio)**2)
+							  / (sum(weights) * (len(thisbin)-1)))
 				if std_dev == 0:		#If this happens, don't trust bin
 					signif= 0
 				else:
@@ -305,7 +308,7 @@ class bin_results:
 				#Store in the result & update the counter
 				result.loc[counter] = [self.obs_filter, self.binsize,
 					self.phase, self.method, newbin_start, newbin_stop, fratio,
-					fratio_err, std_dev, len(thisbin), signif]
+					fratio_err, std_dev, len(thisbin), signif, std_dev_old]
 				counter += 1
 
 			#Calc left side of next bin according to the chosen method
