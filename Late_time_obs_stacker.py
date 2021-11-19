@@ -296,7 +296,8 @@ class bin_results:
 				if len(thisbin)==1:
 					std_dev = thisbin.Fratio_err.max()
 				else:
-					std_dev = thisbin.Fratio.std()
+					std_dev = np.sqrt(sum(weights * (thisbin.Fratio-fratio)**2)
+							  / (sum(weights) * (len(thisbin)-1)))
 				if std_dev == 0:		#If this happens, don't trust bin
 					signif= 0
 				else:
