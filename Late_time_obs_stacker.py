@@ -27,35 +27,20 @@ def main():
 	object), and control the progress bar.
 	'''
 	#Set location where the results will be saved
-	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_new_stacker")			#SN Ia
-	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_sub_new_stacker")		#SN Ia sub
-	#saveloc = Path("/Users/terwelj/Projects/Late-time_signals/version_test_results/sim_6")		#Testing
-	#saveloc = Path("/Users/terwelj/Projects/testing_grounds")	#Single object
-	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_2022lcs")				#All SN Ia, with updated lcs
+	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/SN_Ia_2022lcs_no_tails_removed")	#All SN Ia, with updated lcs
 
 	#Set the location of the object csv files and list them
 	dataloc = getenv("ZTFDATA") + '/marshal'
-	#datafiles = list(Path(dataloc, 'SN_Ia').rglob('*.csv'))				#SN Ia
-	#datafiles = list(Path(dataloc, 'SN_Ia_sub').rglob('*.csv'))			#SN Ia sub
-	#datafiles = [Path(dataloc, 'SN_Ia/ZTF18acrdwag_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18abmxahs_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18acurlbj_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18acusrws_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18aasdted_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18aasprui_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18aataafd_SNT_1e-08.csv'),
-	#	Path(dataloc, 'SN_Ia/ZTF18acqqyah_SNT_1e-08.csv')]	#Testing
-	#datafiles = list(Path('/Users/terwelj/Projects/Late-time_signals/sims/sim_6').rglob('sim*.csv')) #Testing
-	#datafiles = [Path('/Users/terwelj/Projects/testing_grounds/ZTF21aagqcnl_SNT_5.000.csv')]	#Single object
-	#print(datafiles)
+
+	#Only get the objects that are in my list as well as have lcs
+	#--> 952 objects (includes non-2018 objects, and those that will fail)
 	datafiles_all = list(Path("/Users/terwelj/Projects/Late-time_signals/ZTF18_Ia_sample_full+40_extra").rglob('*.csv'))
 	obj_list = pd.read_csv('/Users/terwelj/Projects/Late-time_signals/ZTF18_Ia_names_10-02-2022.csv', header=None)
 	datafiles = [i for i in datafiles_all if i.name.rsplit('_S',1)[0] in obj_list.values]
-	print(len(datafiles)) #Only get the objects that are in my list as well as have lcs --> 952 objects
 
 	#Set optional parameters & make the arg_list
 	late_time = 100
-	remove_sn_tails = True
+	remove_sn_tails = False
 	tail_removal_peak_tresh = 18
 	make_plots = False
 	args = [[f, saveloc, late_time, remove_sn_tails, tail_removal_peak_tresh,
@@ -107,14 +92,14 @@ class photom_obj:
 		'''
 		#Save input
 		self.obj_path = obj_path
-		self.name = obj_path.name.rsplit('_S',1)[0]#[:-14]
-		self.saveloc = saveloc / obj_path.name.rsplit('_S',1)[0]#[:-14]
+		self.name = obj_path.name.rsplit('_S',1)[0]
+		self.saveloc = saveloc / self.name
 		self.late_time = late_time
 		self.remove_sn_tails = remove_sn_tails
 		self.trpt = trpt
-		#Make sure the location exists & load the lc
-		self.saveloc.mkdir(exist_ok=True)
+		#load the lc
 		self.load_source()
+		return
 
 	def load_source(self):
 		'''
@@ -157,14 +142,13 @@ class photom_obj:
 		Parameters:
 		data (DataFrame): lc points to determine peak date of
 		'''
-		close_obs_size = 10 #Nr. of days considered to be close by
-		try:
-			peak_light = data.obsmjd[data.Fratio.idxmax()]
-		except:
-			print(f'{self.name}: peak light could not be found, setting it at 58247.2 at mag 17.5 for now')
-			self.peak_mjd = 58247.2
-			self.peak_mag = 17.5
+		if data.empty: #If this is empty, then at most 1 datapoint --> useless
+			self.peak_mjd = None
+			self.peak_mag = None
+			print(f'{self.name}: Not enough points to get peak date & do binning!')
 			return
+		close_obs_size = 10 #Nr. of days considered to be close by
+		peak_light = data.obsmjd[data.Fratio.idxmax()]
 		close_obs = data[abs(data.obsmjd-peak_light)<close_obs_size]
 		while len(close_obs.Fratio[close_obs.Fratio>
 				0.5*close_obs.Fratio.max()])<2:
@@ -218,6 +202,7 @@ class filter_data:
 		self.chi2red = 0
 		self.dof = 0
 		self.results = []
+		return
 
 class bin_results:
 	'''
@@ -367,6 +352,10 @@ def bin_late_time(args):
 	#Unpack args & load object
 	obj_path, saveloc, late_time, remove_sn_tails, trpt, make_plots = args
 	obj_data = photom_obj(obj_path, saveloc, late_time, remove_sn_tails, trpt)
+	if obj_data.peak_mjd is None: #if true, not enough points to bin --> go to next
+		return
+	#Make sure the location exists (Only make folder if something will be put in it)
+	obj_data.saveloc.mkdir(exist_ok=True)
 
 	#Fit end of SN tail & remove it from interfering with the late time binning
 	if ((obj_data.peak_mag < obj_data.trpt) & (obj_data.remove_sn_tails)):
