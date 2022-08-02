@@ -2,7 +2,7 @@
 A program to stack and display late-time observations from the ZTF SN Ia dataset
 
 Author: Jacco Terwel
-Date: 25-07-22
+Date: 02-08-22
 
 - Major overhaul of the program
 - Rewritten binning part, removed obsolete functions, added filtering part
@@ -76,7 +76,7 @@ def main():
 	settings = pd.Series(data_settings)
 	settings.to_csv(saveloc / 'settings.csv')
 
-	print('Initialization complete, strarting checking each object')
+	print('Initialization complete, starting checking each object')
 	#use each cpu core separately & keep track of progress
 	pool = mp.Pool(mp.cpu_count())
 
@@ -162,7 +162,7 @@ class ztf_object:
 			self.lc = pd.read_csv(self.loc, usecols = self.cols, comment='#')
 		except: #In case something goes wrong when reading in
 			self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
-			#print(self.name)
+			print(self.name)
 			self.peak_mjd = 0
 			self.lc = pd.DataFrame(columns=self.cols)
 			return
@@ -307,6 +307,7 @@ class ztf_object:
 						basel = sum(nondets.Fratio*weights)/sum(weights)
 						basel_err = np.sqrt(sum(weights* (nondets.Fratio - basel)**2 /
 											(sum(weights)*len(nondets)-1)))
+						#Correct Fratio
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
 									'Fratio'] -= basel
@@ -316,6 +317,48 @@ class ztf_object:
 																	 (self.lc.fieldid == field)&
 																	 (self.lc.rcid == rcid))].Fratio_err**2 +
 																	 basel_err**2)
+						#Correct mag
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
+									(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+									'mag'] = flux2mag(self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+																  (self.lc.fieldid == field) &
+																  (self.lc.rcid == rcid) &
+																  (self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+																  'Fratio'])
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
+									(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+									'mag_err'] = dflux2dmag(self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+																		(self.lc.fieldid == field) &
+																		(self.lc.rcid == rcid) &
+																		(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+																		'Fratio'],
+															self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+																		(self.lc.fieldid == field) &
+																		(self.lc.rcid == rcid) &
+																		(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+																		'Fratio_err'])
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
+									(self.lc.Fratio < 5*self.lc.Fratio_err))].index,
+									'upper_limit'] = flux2mag(5*self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+																			(self.lc.fieldid == field) &
+																			(self.lc.rcid == rcid) &
+																			(self.lc.Fratio < 5*self.lc.Fratio_err))].index,
+																			'Fratio_err'])
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
+									(self.lc.Fratio < 5*self.lc.Fratio_err))].index,
+									'mag'] = 99
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
+									(self.lc.Fratio < 5*self.lc.Fratio_err))].index,
+									'mag_err'] = 99
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
+									(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+									'upper_limit'] = 99
 						self.text += f'The combination of filter {band}, field {field}, and rcid {rcid} has baseline correction {basel} +- {basel_err}\n'
 						self.imp_df = self.imp_df.append({'name':f'b{band}f{field}rcid{rcid}', 'val':basel},
 														 ignore_index=True)
@@ -334,11 +377,19 @@ class ztf_object:
 		Assume the highest Fratio observation is the peak, check for another
 		observation with at least 1/2 times the peak flux within close_obs_size
 		days. If none are found it is not considered real. Drop and try again.
+		The chosen datapoints need to be detections, not upper limits
 		'''
 		self.text += '-----\nfind peak date\n\n'
-		data = self.lc[self.lc.cuts==0].copy()
-		if data.empty: #If this is empty, then at most 1 datapoint --> useless
+		data = self.lc[((self.lc.cuts==0) & (self.lc.mag!=99))].copy()
+		if data.empty:
 			self.text += 'Not enough points to get peak date & do binning!\n'
+			self.peak_mjd = 0
+			self.peak_mag = 0
+			return
+		if len(data) == 1: #If there is only 1 data point, use that one
+			self.text += 'Only 1 observation found, it is automatically set at the peak mjd'
+			self.peak_mjd = data.obsmjd.values[0]
+			self.peak_mag = data.mag.values[0]
 			return
 		close_obs_size = 10 #Nr. of days considered to be close by
 		peak_light = data.obsmjd[data.Fratio.idxmax()]
@@ -559,11 +610,8 @@ def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
 			verdict += 1
 		else:
 			verdict += 2
-			#Trusted detections require Fratio >0, significance >= sigma, & enough points
-			pos_bins = bins[bins.Fratio>0]
-			trusted_bins = pos_bins[((pos_bins.significance>=sigma) &
-									 (pos_bins.nr_binned>=np.maximum(2,
-								 									 2+4*(-2.5*np.log10(pos_bins.Fratio)-21))))]
+			#Trusted detections require Fratio >0, significance >= sigma
+			trusted_bins = bins[((bins.Fratio>0) & (bins.significance>=sigma))]
 			#Do the bins with detections contain enough points?
 			if not trusted_bins.empty:
 				verdict += 4
@@ -600,7 +648,7 @@ def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
 	#Put the results in a df, including the fit result if it was made
 	if fit != None:
 		#Save the model
-		x = np.linspace(fit.params['t0'].value, fit.params['t0'].value+1000, 3000)
+		x = np.linspace(fit.params['t0'].value, bins.mjd_bin.max()+100, 3000)
 		fit_res = pd.DataFrame({'x':x, 'y':fit.eval(x=x)*max_val, 'dy':fit.eval_uncertainty(x=x)*max_val})
 		fit_res.to_csv(saveloc/f'tail_mod_f{bins.obs_filter[0][-1]}_b{bins.binsize[0]}_p{bins.phase[0]}.csv')
 		if fit.errorbars:
@@ -681,11 +729,16 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 							if False not in [((i&1024!=0) & (i&4096!=0)) for i in with_fits.verdict.values]: #Are any of the fits inconsistent with a normal Ia tail?
 								normal = True
 								#Only failed fits might be interesting --> successfull attempts have verdict are 22 or contain 64
-								if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
-									too_nuc = True
-								else:
+								if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 									too_nuc = False
+									print(obj_loc.name, 'has no host data')
 									succes_attempts = bel_verdicts[((bel_verdicts.verdict&64!=0) | (bel_verdicts.verdict==22))]
+								else:
+									if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
+										too_nuc = True
+									else:
+										too_nuc = False
+										succes_attempts = bel_verdicts[((bel_verdicts.verdict&64!=0) | (bel_verdicts.verdict==22))]
 							else:
 								normal = False
 								#Failed & non normal Ia fits are interesting --> successfull attempts are those with verdict 22 or with_fits not containing 1024 or 4096
@@ -699,11 +752,16 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 																 ignore_index=True)
 					else:
 						pos_tail = False
-						if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
-							too_nuc = True
-						else:
+						if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 							too_nuc = False
-							succes_attempts = bel_verdicts[bel_verdicts.verdict==22] #Only successful attempts through this route
+							print(obj_loc.name, 'has no host data')
+							succes_attempts = bel_verdicts[bel_verdicts.verdict==22]
+						else:
+							if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
+								too_nuc = True
+							else:
+								too_nuc = False
+								succes_attempts = bel_verdicts[bel_verdicts.verdict==22] #Only successful attempts through this route
 		if not too_nuc:
 			#Are there enough successful attempts per band?
 			nr_g = len(succes_attempts[succes_attempts.band=='ZTF_g'])
@@ -773,7 +831,7 @@ def get_host_data(objs, loc_list, dat_list):
 	                                                                    sn_hosts.host_dec*u.deg,
 	                                                                    frame='icrs')).arcsecond
 	#Those without a host location get separation=-99
-	sn_hosts.loc[((sn_hosts.host_ra==270)&(sn_hosts.host_dec==-80)), 'separation'] =- 99
+	sn_hosts.loc[((sn_hosts.host_ra==270)&(sn_hosts.host_dec==-80)), 'separation'] = -99
 	#add the catalog magnitudes for the host
 	host_data = pd.read_csv(dat_list, header=0, usecols=['ztfname', 'ra_gal',
 														 'dec_gal', 'host_cat_mag',
@@ -783,6 +841,12 @@ def get_host_data(objs, loc_list, dat_list):
 	    for key in host_mags:
 	        sn_hosts.loc[sn_hosts[sn_hosts.ztfname==i].index, key] = host_mags[key]
 	return sn_hosts
+
+def flux2mag(flux):
+	return -2.5*np.log10(flux)
+
+def dflux2dmag(flux, flux_err):
+	return 2.5*flux_err / (np.log(10)*flux)
 
 if (__name__ == "__main__"):
 	main()
