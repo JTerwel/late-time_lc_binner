@@ -162,7 +162,6 @@ class ztf_object:
 			self.lc = pd.read_csv(self.loc, usecols = self.cols, comment='#')
 		except: #In case something goes wrong when reading in
 			self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
-			print(self.name)
 			self.peak_mjd = 0
 			self.lc = pd.DataFrame(columns=self.cols)
 			return
