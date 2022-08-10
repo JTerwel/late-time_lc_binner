@@ -741,14 +741,22 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 							else:
 								normal = False
 								#Failed & non normal Ia fits are interesting --> successfull attempts are those with verdict 22 or with_fits not containing 1024 or 4096
-								if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
-									too_nuc = True
-								else:
+								if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 									too_nuc = False
+									print(obj_loc.name, 'has no host data')
 									succes_attempts = pd.concat([bel_verdicts[bel_verdicts.verdict==22],
 																 with_fits[((with_fits.verdict&1024==0)|
 																 			(with_fits.verdict&4096==0))]],
 																 ignore_index=True)
+								else:
+									if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
+										too_nuc = True
+									else:
+										too_nuc = False
+										succes_attempts = pd.concat([bel_verdicts[bel_verdicts.verdict==22],
+																	 with_fits[((with_fits.verdict&1024==0)|
+																	 			(with_fits.verdict&4096==0))]],
+																	 ignore_index=True)
 					else:
 						pos_tail = False
 						if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
