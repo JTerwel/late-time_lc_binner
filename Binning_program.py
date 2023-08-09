@@ -2,7 +2,7 @@
 A program to stack and display late-time observations from the ZTF SN Ia dataset
 
 Author: Jacco Terwel
-Date: 02-08-22
+Date: 26-02-23
 
 - Major overhaul of the program
 - Rewritten binning part, removed obsolete functions, added filtering part
@@ -17,6 +17,14 @@ Changes not on GitHub:
 - Use the correct names for the simulation light curves (No ZTF in the name)
 - Fixed issue where final_verdict would crash if the object was not matched host data
 - Extra line to remove rows where rcid=NaN (Removes 2017 observations only)
+
+idr specific changes:
+- Made to work with ztfcosmoidr specific file format instead of raw FPbot files
+- Update in flags & cloudy implementation fix issue with removing too many data points
+- Different flux uncertainty estimations methods for testing (includes typo fix)
+- sep dist = 0 as this cut isn't used anymore
+- typo version is buggy, but was for a test only anyway
+- This version is quite chaotic, but should work properly - IF this is the final version, maybe a good idea to rewrite & comment before publishing the code
 '''
 
 #Imports & global constants
@@ -41,9 +49,14 @@ def main():
 	Make a list of locations to find the required data for each object, set
 	the location where all results will be saved (separate folders for each
 	object), and control the progress bar.
+
+	The way this script is written, it assumes to be given 3 commandline variables:
+	- lc loc: The location of the lcs to bin
+	- saveloc: The location to store the output
+	- err_method: What has to be done with the flux uncertainties after the baseline correction: add baseline uncertainty (me), rescale(Mat), both
 	'''
-	if len(sys.argv) != 3:
-		print(f'ERROR: Wrong amount of arguments, need 3\n These were given: {sys.argv}')
+	if len(sys.argv) != 4:
+		print(f'ERROR: Wrong amount of arguments, need 4\n These were given: {sys.argv}')
 		return
 	#Set location where the results will be saved
 	print('\nStarting the program\nCollecting objects')
@@ -64,7 +77,7 @@ def main():
 
 	#Set free parameters & make the arg_list
 	late_time = 100
-	cuts = {'ampl_err': 2, 'chi2dof': 3, 'seeing': 3, 'cloudy': 0, 'infobits': 0}
+	cuts = [1, 2, 4, 8, 64]
 	base_gap = 40
 	binsizes = [100,  75, 50, 25]
 	phases = [0.0, 0.25, 0.5, 0.75]
@@ -72,16 +85,19 @@ def main():
 	earliest_tail_fit_start = 60
 	verdict_sigma = 5
 	tail_fit_chi2dof_tresh = 5
-	min_sep = 1 #Minimal SN - host nucleus separation in arcsec
+	min_sep = 0 #Minimal SN - host nucleus separation in arcsec
 	min_successes = 4
-	cols = ['obsmjd', 'filter', 'Fratio', 'Fratio.err', 'mag', 'mag_err', 'upper_limit',
-			'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzprms', 'airmass', 'nmatches',
-			'rcid', 'fieldid', 'infobits', 'filename']
+	err_method = sys.argv[3] #Select error method for flux uncertainties (me, typo, Mat, both)
+	cols = ['mjd', 'filter', 'flux', 'flux_err', 'ZP', 'flag', 'mag', 'mag_err', 'field_id', 'rcid', 'flux_offset', 'err_scale']
+
+	#TEST: ONLY RUN 8
+	#datafiles = datafiles[500:508]
+
 	args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, cols, binsizes, phases,
-			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh] for f in datafiles]
+			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh, err_method] for f in datafiles]
 
 	#Save all settings
-	data_settings = cuts
+	data_settings = {'cuts': cuts}
 	data_settings.update({'late_time':late_time, 'binsizes':binsizes, 'phases':phases,
 						  'method':method, 'min_sep':min_sep, 'min_successes':min_successes})
 	settings = pd.Series(data_settings)
@@ -130,6 +146,7 @@ class ztf_object:
 	- earliest_tail_fit_start (float): earliest observations relative to peak to consider when fitting the tail
 	- verdict_sigma (float): significance level for a bin to be considered a detection
 	- tail_fit_chi2dof_tresh: chi2dof treshold for a successful tail fit
+	- err_method (string): method of flux uncertainty correction used (me, typo, Mat, both)
 	- peak_mjd (float): found mjd of the SN peak
 	- peak_mag (float): found mag of the SN peak
 	- text (string): Notes on this object, will be saved in a .txt file
@@ -140,7 +157,7 @@ class ztf_object:
 
 	def __init__(self, args):
 		#Unpack args into easier to use names
-		self.name = args[0].name.rsplit('_S',1)[0]
+		self.name = args[0].name.rsplit('_L',1)[0]
 		if (('ZTF' not in self.name) & ('ztf' not in self.name)):
 			self.name = args[0].name[:-4] #Use correct names for simulation lc
 		self.loc = args[0]
@@ -157,6 +174,7 @@ class ztf_object:
 		self.earliest_tail_fit_start = args[11]
 		self.verdict_sigma = args[12]
 		self.tail_fit_chi2dof_tresh = args[13]
+		self.err_method = args[14]
 		self.text = 'Notes on ' + self.name + ':\n\n'
 		#Initialize the lists that will store the bins & verdicts
 		self.binlist = []
@@ -171,20 +189,18 @@ class ztf_object:
 	def load_source(self):
 		#Load the lc
 		try:
-			self.lc = pd.read_csv(self.loc, usecols = self.cols, comment='#')
+			self.lc = pd.read_csv(self.loc, usecols = self.cols, comment='#', delim_whitespace=True)
 		except: #In case something goes wrong when reading in
 			self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
 			self.peak_mjd = 0
 			self.lc = pd.DataFrame(columns=self.cols)
 			return
 		#Rename problematic columns
-		self.lc.rename(columns={'filter':'obs_filter', 'Fratio.err':'Fratio_err',
-						   		'ampl.err':'ampl_err'}, inplace=True)
+		self.lc.rename(columns={'mjd':'obsmjd', 'filter':'obs_filter', 'flux':'Fratio', 'flux_err':'Fratio_err', 'field_id':'fieldid'}, inplace=True)
 		#Remove rows with rcid = NaN
 		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
-		#Add cloudy, cuts, & refmags
-		self.calc_cloudy()
-		self.apply_cuts()
+		#Cloudy & cuts are in flag, Undo idr baseline correction & add refmags
+		self.undo_correction()
 		self.match_ref_im()
 		#Find the peak of the SN
 		self.find_peak_date()
@@ -221,60 +237,22 @@ class ztf_object:
 		self.check_refmjd()
 		return
 
-	def calc_cloudy(self):
-		#Cloudy has 4 conditions, pass 1 & the point should be removed
-		#(Conditions from Adam Miller / Mat Smith)
-	    #They get values 1,2,4,8 to keep track of which condition removed each point,
-	    #& 16 for no_data (field=-99)
-	    cloudy = np.zeros(len(self.lc))
-	    #1) magzp > val I - val II * airmass      Wrong zp
-	    cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & \
-	    				 (self.lc.magzp > 26.7-0.2*self.lc.airmass)) | \
-	                    ((self.lc.obs_filter.str.contains('r')) & \
-	                     (self.lc.magzp > 26.65-0.15*self.lc.airmass)) | \
-	                    ((self.lc.obs_filter.str.contains('i')) & \
-	                     (self.lc.magzp > 26.0-0.07*self.lc.airmass)))] += 1
-	    #2) magzprms > val III                    Spread in zp too large
-	    cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & (self.lc.magzprms > 0.06)) | \
-	                    ((self.lc.obs_filter.str.contains('r')) & (self.lc.magzprms > 0.05)) | \
-	                    ((self.lc.obs_filter.str.contains('i')) & (self.lc.magzprms > 0.06)))] += 2
-	    #3) nmatches < val IV                     Not enough catalog sources matched for alignment etc.
-	    cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & (self.lc.nmatches < 80)) | \
-	                    ((self.lc.obs_filter.str.contains('r')) & (self.lc.nmatches < 120)) | \
-	                    ((self.lc.obs_filter.str.contains('i')) & (self.lc.nmatches < 100)))] += 4
-	    #4) magzp < zp_rcid - val II * airmass    Wrong zp
-	    for _ in self.lc.rcid.unique():
-	        cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & (self.lc.rcid == _) & \
-	        				 (self.lc.magzp < self.zp_rcid.g.iloc[int(_)]-0.2*self.lc.airmass)) | \
-	                        ((self.lc.obs_filter.str.contains('r')) & (self.lc.rcid == _) & \
-	                         (self.lc.magzp < self.zp_rcid.r.iloc[int(_)]-0.15*self.lc.airmass)) | \
-	                        ((self.lc.obs_filter.str.contains('i')) & (self.lc.rcid == _) & \
-	                         (self.lc.magzp < self.zp_rcid.i.iloc[int(_)]-0.07*self.lc.airmass)))] += 8
-	    #5) field = -99                           No data
-	    cloudy[np.where(self.lc.fieldid==-99)] += 16
-	    self.lc['cloudy'] = cloudy
-	    return
-
-	def apply_cuts(self):
-		cts = np.zeros(len(self.lc))
-	    #cut 1: ampl_err > 2, removes failed photometry
-		if 'ampl_err' in self.cuts.keys():
-			cts[np.where(self.lc['ampl_err'] <= self.cuts['ampl_err'])] += 1
-		#cut 2: chi2dof <= 3, removes bad psf fits
-		if 'chi2dof' in self.cuts.keys():
-			cts[np.where(self.lc.chi2dof > self.cuts['chi2dof'])] += 2
-		#cut 3: seeing <= 3, removes bad seeing
-		if 'seeing' in self.cuts.keys():
-			cts[np.where(self.lc.seeing > self.cuts['seeing'])] += 4
-		#cut 4: cloudy = False
-		if 'cloudy' in self.cuts.keys():
-			cts[np.where(self.lc.cloudy != self.cuts['cloudy'])] += 8
-		#cut 5: infobits = 0 (or NaN)
-		if 'infobits' in self.cuts.keys():
-			#This keeps infobits=NaN in as well, NaNs should become values in the idr
-	 		#(in August according to Mat)
-			cts[np.where((self.lc.infobits > self.cuts['infobits']))] += 16
-		self.lc['cuts'] = cts
+	def undo_correction(self):
+		'''
+		Undo the corrections applied to the flux/Fratio & flux_err/Fratio_err in preparation to use my own
+		'''
+		self.lc.Fratio = self.lc.Fratio + self.lc.flux_offset
+		self.lc.Fratio_err = self.lc.Fratio_err / self.lc.err_scale
+		#update mag values & add upper limits
+		self.lc['upper_limit'] = np.zeros(len(self.lc))
+		#Detections
+		self.lc.mag[self.lc.Fratio >= self.lc.Fratio_err] = flux2mag(self.lc.Fratio[self.lc.Fratio >= self.lc.Fratio_err], self.lc.ZP[self.lc.Fratio >= self.lc.Fratio_err])
+		self.lc.mag_err[self.lc.Fratio >= self.lc.Fratio_err] = dflux2dmag(self.lc.Fratio[self.lc.Fratio >= self.lc.Fratio_err], self.lc.Fratio_err[self.lc.Fratio >= self.lc.Fratio_err])
+		self.lc.upper_limit[self.lc.Fratio >= self.lc.Fratio_err] = 99
+		#Non-detections
+		self.lc.mag[self.lc.Fratio < self.lc.Fratio_err] = 99
+		self.lc.mag_err[self.lc.Fratio < self.lc.Fratio_err] = 99
+		self.lc.upper_limit[self.lc.Fratio < self.lc.Fratio_err] = flux2mag(5*self.lc.Fratio_err[self.lc.Fratio < self.lc.Fratio_err], self.lc.ZP[self.lc.Fratio < self.lc.Fratio_err])
 		return
 
 	def match_ref_im(self):
@@ -284,31 +262,31 @@ class ztf_object:
 		self.text += '-----\nmatch reference images\n\n'
 		self.lc['ref_maglim'] = ''
 		for _ in self.lc.index:
-			if 'g' in self.lc.filename[_]:
+			if 'g' in self.lc.obs_filter[_]:
 				fid = 1
-			elif 'r' in self.lc.filename[_]:
+			elif 'r' in self.lc.obs_filter[_]:
 				fid = 2
-			elif 'i' in self.lc.filename[_]:
+			elif 'i' in self.lc.obs_filter[_]:
 				fid = 3
 			else:
 				self.text += 'ERROR: could not determine filter\n'
 				continue
 			try:
 				self.lc.loc[_, 'ref_maglim'] = self.refmags[(
-					(self.refmags.field==int(self.lc.filename[_].split('_')[2])) &
+					(self.refmags.field==self.lc.fieldid[_]) &
 					(self.refmags.fid==fid) & (self.refmags.rcid==self.lc.rcid[_]))
 					].maglimit.iloc[0]
 			except: #TEMPORARY SOLUTION!
-				self.text += f'Could not find a ref mag for band {fid}, rcid {self.lc.rcid[_]}, field {self.lc.filename[_].split("_")[2]}, using the average of the field & band'
+				self.text += f'Could not find a ref mag for band {fid}, rcid {self.lc.rcid[_]}, field {self.lc.fieldid[_]}, using the average of the field & band'
 				self.lc.loc[_, 'ref_maglim'] = self.refmags[(
-                                        (self.refmags.field==int(self.lc.filename[_].split('_')[2])) &
-                                        (self.refmags.fid==fid))].maglimit.mean()
+					(self.refmags.field==self.lc.fieldid[_]) &
+					(self.refmags.fid==fid))].maglimit.mean()
 		return
 
 	def correct_baseline(self):
 		self.text += '-----\ncorrect baseline \n\n'
 		#Begin with dropping non_used data (dropped pionts are in lc_orig)
-		self.lc = self.lc[self.lc.cuts==0].copy()
+		self.lc = self.lc[self.lc.flag&sum(self.cuts)==0].copy()
 		for band in ['g', 'r', 'i']:
 			for field in self.lc[self.lc.obs_filter.str.contains(band)].fieldid.unique():
 				for rcid in self.lc[((self.lc.obs_filter.str.contains(band)) &
@@ -324,18 +302,37 @@ class ztf_object:
 					if len(nondets) > 1: #Need at least 2 points for a baseline correction
 						weights = 1/nondets.Fratio_err**2
 						basel = sum(nondets.Fratio*weights)/sum(weights)
-						basel_err = np.sqrt(sum(weights* (nondets.Fratio - basel)**2 /
+						#Weighted baseline uncertainties using the correct formula & the one with my typo from last iteration (for comparison)
+						basel_err = np.sqrt(sum(weights* (nondets.Fratio - basel)**2) /
+											(sum(weights)*(len(nondets)-1)))
+						basel_err_wrong = np.sqrt(sum(weights* (nondets.Fratio - basel)**2 /
 											(sum(weights)*len(nondets)-1)))
+						self.text += f'{band} {field} {rcid} <{self.peak_mjd-self.base_gap}: basel = {basel:.3f}, err = {basel_err:.3f}, mean = {nondets.Fratio.mean():.3f}\n'
 						#Correct Fratio
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
 									'Fratio'] -= basel
-						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
-									(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
-									'Fratio_err'] = np.sqrt(self.lc[((self.lc.obs_filter.str.contains(band))&
-																	 (self.lc.fieldid == field)&
-																	 (self.lc.rcid == rcid))].Fratio_err**2 +
-																	 basel_err**2)
+						#Correct Fratio_err according to the chosen method
+						if ((self.err_method == 'me') | (self.err_method =='both')):
+							self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+										(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
+										'Fratio_err'] = np.sqrt(self.lc[((self.lc.obs_filter.str.contains(band))&
+																		 (self.lc.fieldid == field)&
+																		 (self.lc.rcid == rcid))].Fratio_err**2 +
+																		 basel_err**2)
+						if self.err_method == 'typo':
+							self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+										(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
+										'Fratio_err'] = np.sqrt(self.lc[((self.lc.obs_filter.str.contains(band))&
+																		(self.lc.fieldid == field)&
+																		(self.lc.rcid == rcid))].Fratio_err**2 +
+																		basel_err_wrong**2)
+						if ((self.err_method =='Mat') | (self.err_method == 'both')):	#error scaling
+							scale = self.calc_Mat_err(nondets.Fratio, nondets.Fratio_err)
+							self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) & (self.lc.fieldid == field) & (self.lc.rcid == rcid))].index, 'Fratio_err'] *= scale
+							self.text += f'err_scale = {scale}\n'
+						if ((self.err_method !='me') & (self.err_method != 'typo') & ((self.err_method !='Mat') & (self.err_method != 'both'))):
+							self.text += f'err_method {self.err_method} is not one of the 4 known ones (me, typo, Mat, both). The Fratio_err values have not been modified\n'
 						#Correct mag
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
@@ -344,7 +341,11 @@ class ztf_object:
 																  (self.lc.fieldid == field) &
 																  (self.lc.rcid == rcid) &
 																  (self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
-																  'Fratio'])
+																  'Fratio'], self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+																				(self.lc.fieldid == field) &
+																				(self.lc.rcid == rcid) &
+																				(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
+																				'ZP'])
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
 									(self.lc.Fratio >= 5*self.lc.Fratio_err))].index,
@@ -365,7 +366,7 @@ class ztf_object:
 																			(self.lc.fieldid == field) &
 																			(self.lc.rcid == rcid) &
 																			(self.lc.Fratio < 5*self.lc.Fratio_err))].index,
-																			'Fratio_err'])
+																			'Fratio_err'], 30)
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
 									(self.lc.Fratio < 5*self.lc.Fratio_err))].index,
@@ -390,6 +391,12 @@ class ztf_object:
 											  (self.lc.rcid == rcid))].index, inplace=True)
 		return
 
+	def calc_Mat_err(self, flux, err):
+		'''
+		Reschale the uncertainty according to Mat's method
+		'''
+		return max(1, np.sqrt(sum((flux/err)**2)/len(flux)))
+
 	def find_peak_date(self):
 		'''
 		Determine the date of peak light.
@@ -399,7 +406,7 @@ class ztf_object:
 		The chosen datapoints need to be detections, not upper limits
 		'''
 		self.text += '-----\nfind peak date\n\n'
-		data = self.lc[((self.lc.cuts==0) & (self.lc.mag!=99))].copy()
+		data = self.lc[((self.lc.flag&sum(self.cuts)==0) & (self.lc.mag!=99))].copy()
 		if data.empty:
 			self.text += 'Not enough points to get peak date & do binning!\n'
 			self.peak_mjd = 0
@@ -586,7 +593,7 @@ def bin_late_time(data, band, binsize, phase, method, late_time):
 			#Add systematic uncertainties coming from the reference images
 			#NOTE std_dev = without syst.error, std_dev_full = with syst.error
 			#ref_maglim = 5 sigma mag limit --> sigma_ref = 1/5 * ref_fratiolim
-			std_dev_full = np.sqrt(std_dev**2 + np.median(10**(-0.4*thisbin.ref_maglim)/5)**2)
+			std_dev_full = np.sqrt(std_dev**2 + np.median(10**(-0.4*(thisbin.ref_maglim-30))/5)**2)
 			if std_dev == 0:		#If this happens, don't trust bin
 				signif= 0
 			else:
@@ -870,8 +877,8 @@ def get_host_data(objs, loc_list, dat_list):
 	        sn_hosts.loc[sn_hosts[sn_hosts.ztfname==i].index, key] = host_mags[key]
 	return sn_hosts
 
-def flux2mag(flux):
-	return -2.5*np.log10(flux)
+def flux2mag(flux, zp):
+	return -2.5*np.log10(flux) + zp
 
 def dflux2dmag(flux, flux_err):
 	return 2.5*flux_err / (np.log(10)*flux)
