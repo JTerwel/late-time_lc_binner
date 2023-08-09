@@ -4,6 +4,8 @@ A program to stack and display late-time observations from the ZTF SN Ia dataset
 Author: Jacco Terwel
 Date: 26-02-23
 
+This will be the final version -- A cleaned up version of _idr with the sims part integrated if possible
+
 - Major overhaul of the program
 - Rewritten binning part, removed obsolete functions, added filtering part
 - Redesigned how results are saved, should be easier & clearer now
@@ -21,9 +23,7 @@ Changes not on GitHub:
 idr specific changes:
 - Made to work with ztfcosmoidr specific file format instead of raw FPbot files
 - Update in flags & cloudy implementation fix issue with removing too many data points
-- Different flux uncertainty estimations methods for testing (includes typo fix)
 - sep dist = 0 as this cut isn't used anymore
-- typo version is buggy, but was for a test only anyway
 - This version is quite chaotic, but should work properly - IF this is the final version, maybe a good idea to rewrite & comment before publishing the code
 '''
 
@@ -41,6 +41,7 @@ from tqdm import tqdm
 from lmfit import Model, Parameters
 import traceback
 import sys
+import ast
 
 def main():
 	'''
@@ -53,11 +54,15 @@ def main():
 	The way this script is written, it assumes to be given 3 commandline variables:
 	- lc loc: The location of the lcs to bin
 	- saveloc: The location to store the output
-	- err_method: What has to be done with the flux uncertainties after the baseline correction: add baseline uncertainty (me), rescale(Mat), both
+	- config: The config file
 	'''
 	if len(sys.argv) != 4:
-		print(f'ERROR: Wrong amount of arguments, need 4\n These were given: {sys.argv}')
+		print('ERROR: Wrong amount of arguments, run the program by typing the following:')
+		print(f'python3 Binning_program.py <lc loc> <save loc> <config file>\n These were given: {sys.argv}')
 		return
+	#Load the config file
+	config = pd.read_csv(sys.argv[3], header=None, index_col=0, delim_whitespace=True, comment='#')
+
 	#Set location where the results will be saved
 	print('\nStarting the program\nCollecting objects')
 	saveloc = Path(sys.argv[2])
@@ -67,34 +72,30 @@ def main():
 	datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
 
 	#Load the reference image data
-	refmags = pd.read_csv('/home/jaccoterwel/Documents/Late-time_obs_binning/ref_im_data.csv',
+	refmags = pd.read_csv(config.loc['refmags_loc'][1],
 		usecols=['field', 'fid', 'rcid', 'maglimit', 'startmjd', 'endmjd'])
 
 
 	#Load camera ZPs
-	read_opts = {'delim_whitespace': True, 'names': ['g', 'r', 'i'],'comment': '#'}
-	zp_rcid = pd.read_csv('/home/jaccoterwel/Documents/Late-time_obs_binning/zp_thresholds_quadID.txt', **read_opts)
+	read_opts = {'delim_whitespace': True, 'names': ['g', 'r', 'i'], 'comment': '#'}
+	zp_rcid = pd.read_csv(config.loc['zp_rcid_loc'][1], **read_opts)
 
 	#Set free parameters & make the arg_list
-	late_time = 100
-	cuts = [1, 2, 4, 8, 64]
-	base_gap = 40
-	binsizes = [100,  75, 50, 25]
-	phases = [0.0, 0.25, 0.5, 0.75]
-	method = 4
-	earliest_tail_fit_start = 60
-	verdict_sigma = 5
-	tail_fit_chi2dof_tresh = 5
-	min_sep = 0 #Minimal SN - host nucleus separation in arcsec
-	min_successes = 4
-	err_method = sys.argv[3] #Select error method for flux uncertainties (me, typo, Mat, both)
+	late_time = ast.literal_eval(config.loc['late_time'][1])
+	cuts = ast.literal_eval(config.loc['cuts'][1])
+	base_gap = ast.literal_eval(config.loc['base_gap'][1])
+	binsizes = ast.literal_eval(config.loc['binsizes'][1])
+	phases = ast.literal_eval(config.loc['phases'][1])
+	method = ast.literal_eval(config.loc['method'][1])
+	earliest_tail_fit_start = ast.literal_eval(config.loc['earliest_tail_fit_start'][1])
+	verdict_sigma = ast.literal_eval(config.loc['verdict_sigma'][1])
+	tail_fit_chi2dof_tresh = ast.literal_eval(config.loc['tail_fit_chi2dof_tresh'][1])
+	min_sep = ast.literal_eval(config.loc['min_sep'][1])
+	min_successes = ast.literal_eval(config.loc['min_successes'][1])
 	cols = ['mjd', 'filter', 'flux', 'flux_err', 'ZP', 'flag', 'mag', 'mag_err', 'field_id', 'rcid', 'flux_offset', 'err_scale']
 
-	#TEST: ONLY RUN 8
-	#datafiles = datafiles[500:508]
-
 	args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, cols, binsizes, phases,
-			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh, err_method] for f in datafiles]
+			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh] for f in datafiles]
 
 	#Save all settings
 	data_settings = {'cuts': cuts}
@@ -112,8 +113,8 @@ def main():
 	pool.join()
 	print('All objects binned & evaluated, putting objects through the final filter')
 	#Load the host data
-	loc_list = '/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_locs.csv'
-	dat_list = '/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_data.csv'
+	loc_list = config.loc['loc_list_loc'][1]
+	dat_list = config.loc['dat_list_loc'][1]
 	host_dat = get_host_data([i.name.rsplit('_S',1)[0] for i in datafiles], loc_list, dat_list)
 	#Give the final verdicts
 	all_obs = [f for f in saveloc.rglob('*') if f.is_dir()]
@@ -146,7 +147,6 @@ class ztf_object:
 	- earliest_tail_fit_start (float): earliest observations relative to peak to consider when fitting the tail
 	- verdict_sigma (float): significance level for a bin to be considered a detection
 	- tail_fit_chi2dof_tresh: chi2dof treshold for a successful tail fit
-	- err_method (string): method of flux uncertainty correction used (me, typo, Mat, both)
 	- peak_mjd (float): found mjd of the SN peak
 	- peak_mag (float): found mag of the SN peak
 	- text (string): Notes on this object, will be saved in a .txt file
@@ -174,7 +174,6 @@ class ztf_object:
 		self.earliest_tail_fit_start = args[11]
 		self.verdict_sigma = args[12]
 		self.tail_fit_chi2dof_tresh = args[13]
-		self.err_method = args[14]
 		self.text = 'Notes on ' + self.name + ':\n\n'
 		#Initialize the lists that will store the bins & verdicts
 		self.binlist = []
@@ -305,34 +304,17 @@ class ztf_object:
 						#Weighted baseline uncertainties using the correct formula & the one with my typo from last iteration (for comparison)
 						basel_err = np.sqrt(sum(weights* (nondets.Fratio - basel)**2) /
 											(sum(weights)*(len(nondets)-1)))
-						basel_err_wrong = np.sqrt(sum(weights* (nondets.Fratio - basel)**2 /
-											(sum(weights)*len(nondets)-1)))
 						self.text += f'{band} {field} {rcid} <{self.peak_mjd-self.base_gap}: basel = {basel:.3f}, err = {basel_err:.3f}, mean = {nondets.Fratio.mean():.3f}\n'
 						#Correct Fratio
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
 									'Fratio'] -= basel
-						#Correct Fratio_err according to the chosen method
-						if ((self.err_method == 'me') | (self.err_method =='both')):
-							self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
-										(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
-										'Fratio_err'] = np.sqrt(self.lc[((self.lc.obs_filter.str.contains(band))&
-																		 (self.lc.fieldid == field)&
-																		 (self.lc.rcid == rcid))].Fratio_err**2 +
-																		 basel_err**2)
-						if self.err_method == 'typo':
-							self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
-										(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
-										'Fratio_err'] = np.sqrt(self.lc[((self.lc.obs_filter.str.contains(band))&
-																		(self.lc.fieldid == field)&
-																		(self.lc.rcid == rcid))].Fratio_err**2 +
-																		basel_err_wrong**2)
-						if ((self.err_method =='Mat') | (self.err_method == 'both')):	#error scaling
-							scale = self.calc_Mat_err(nondets.Fratio, nondets.Fratio_err)
-							self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) & (self.lc.fieldid == field) & (self.lc.rcid == rcid))].index, 'Fratio_err'] *= scale
-							self.text += f'err_scale = {scale}\n'
-						if ((self.err_method !='me') & (self.err_method != 'typo') & ((self.err_method !='Mat') & (self.err_method != 'both'))):
-							self.text += f'err_method {self.err_method} is not one of the 4 known ones (me, typo, Mat, both). The Fratio_err values have not been modified\n'
+						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
+											 (self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
+									'Fratio_err'] = np.sqrt(self.lc[((self.lc.obs_filter.str.contains(band))&
+																	 (self.lc.fieldid == field)&
+																	 (self.lc.rcid == rcid))].Fratio_err**2 +
+																	 basel_err**2)
 						#Correct mag
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid) &
@@ -390,12 +372,6 @@ class ztf_object:
 											  (self.lc.fieldid == field)&
 											  (self.lc.rcid == rcid))].index, inplace=True)
 		return
-
-	def calc_Mat_err(self, flux, err):
-		'''
-		Reschale the uncertainty according to Mat's method
-		'''
-		return max(1, np.sqrt(sum((flux/err)**2)/len(flux)))
 
 	def find_peak_date(self):
 		'''
