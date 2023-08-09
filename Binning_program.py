@@ -8,9 +8,20 @@ Date: 02-08-22
 - Rewritten binning part, removed obsolete functions, added filtering part
 - Redesigned how results are saved, should be easier & clearer now
 - Final version of the code
+
+Changes not on GitHub:
+- The data locations
+- The use of command_line args to state obj & save locations
+- Supression of warnings (due to different version of pandas being used here)
+- Change in Skycoord unit definition
+- Use the correct names for the simulation light curves (No ZTF in the name)
+- Fixed issue where final_verdict would crash if the object was not matched host data
+- Extra line to remove rows where rcid=NaN (Removes 2017 observations only)
 '''
 
 #Imports & global constants
+import warnings
+warnings.filterwarnings('ignore')
 import numpy as np
 from numpy import nan, inf
 import pandas as pd
@@ -21,6 +32,7 @@ import astropy.units as u
 from tqdm import tqdm
 from lmfit import Model, Parameters
 import traceback
+import sys
 
 def main():
 	'''
@@ -30,26 +42,25 @@ def main():
 	the location where all results will be saved (separate folders for each
 	object), and control the progress bar.
 	'''
+	if len(sys.argv) != 3:
+		print(f'ERROR: Wrong amount of arguments, need 3\n These were given: {sys.argv}')
+		return
 	#Set location where the results will be saved
 	print('\nStarting the program\nCollecting objects')
-	saveloc = Path("/Users/terwelj/Projects/Late-time_signals/Bin_results")
+	saveloc = Path(sys.argv[2])
+	saveloc.mkdir(exist_ok=True)
 
 	#Set the location of the object csv files and list them
-	#Only get the objects that are in my list as well as have lcs
-	#--> 952 objects (includes non-2018 objects, and those that will fail)
-	datafiles_all = list(Path("/Users/terwelj/Projects/Late-time_signals/ZTF18_Ia_sample_full+40_extra").rglob('*.csv'))
-	obj_list = pd.read_csv('/Users/terwelj/Projects/Late-time_signals/ZTF18_Ia_names_10-02-2022.csv',
-		header=None)
-	datafiles = [i for i in datafiles_all if i.name.rsplit('_S',1)[0] in obj_list.values]
+	datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
 
 	#Load the reference image data
-	refmags = pd.read_csv('/Users/terwelj/projects/Late-time_signals/ref_im_data.csv',
+	refmags = pd.read_csv('/home/jaccoterwel/Documents/Late-time_obs_binning/ref_im_data.csv',
 		usecols=['field', 'fid', 'rcid', 'maglimit', 'startmjd', 'endmjd'])
 
 
 	#Load camera ZPs
 	read_opts = {'delim_whitespace': True, 'names': ['g', 'r', 'i'],'comment': '#'}
-	zp_rcid = pd.read_csv('/Users/terwelj/Projects/Late-time_signals/zp_thresholds_quadID.txt', **read_opts)
+	zp_rcid = pd.read_csv('/home/jaccoterwel/Documents/Late-time_obs_binning/zp_thresholds_quadID.txt', **read_opts)
 
 	#Set free parameters & make the arg_list
 	late_time = 100
@@ -67,7 +78,7 @@ def main():
 			'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzprms', 'airmass', 'nmatches',
 			'rcid', 'fieldid', 'infobits', 'filename']
 	args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, cols, binsizes, phases,
-			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh] for f in datafiles]#I never actually use host_dat in this part --> remove it
+			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh] for f in datafiles]
 
 	#Save all settings
 	data_settings = cuts
@@ -81,13 +92,12 @@ def main():
 	pool = mp.Pool(mp.cpu_count())
 
 	list(tqdm(pool.imap_unordered(check_object, args), total=len(datafiles)))
-	#list(tqdm(pool.imap_unordered(check_object, args[48:64]), total=16)) #For testing
 	pool.close()
 	pool.join()
 	print('All objects binned & evaluated, putting objects through the final filter')
 	#Load the host data
-	loc_list = '/Users/terwelj/Projects/Late-time_signals/SN_host_locs.csv'
-	dat_list = '/Users/terwelj/Projects/Late-time_signals/SN_host_data.csv'
+	loc_list = '/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_locs.csv'
+	dat_list = '/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_data.csv'
 	host_dat = get_host_data([i.name.rsplit('_S',1)[0] for i in datafiles], loc_list, dat_list)
 	#Give the final verdicts
 	all_obs = [f for f in saveloc.rglob('*') if f.is_dir()]
@@ -131,6 +141,8 @@ class ztf_object:
 	def __init__(self, args):
 		#Unpack args into easier to use names
 		self.name = args[0].name.rsplit('_S',1)[0]
+		if (('ZTF' not in self.name) & ('ztf' not in self.name)):
+			self.name = args[0].name[:-4] #Use correct names for simulation lc
 		self.loc = args[0]
 		self.refmags = args[1]
 		self.saveloc = args[2] / self.name
@@ -168,6 +180,8 @@ class ztf_object:
 		#Rename problematic columns
 		self.lc.rename(columns={'filter':'obs_filter', 'Fratio.err':'Fratio_err',
 						   		'ampl.err':'ampl_err'}, inplace=True)
+		#Remove rows with rcid = NaN
+		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
 		#Add cloudy, cuts, & refmags
 		self.calc_cloudy()
 		self.apply_cuts()
@@ -279,10 +293,16 @@ class ztf_object:
 			else:
 				self.text += 'ERROR: could not determine filter\n'
 				continue
-			self.lc.loc[_, 'ref_maglim'] = self.refmags[(
-				(self.refmags.field==int(self.lc.filename[_].split('_')[2])) &
-				(self.refmags.fid==fid) & (self.refmags.rcid==self.lc.rcid[_]))
-				].maglimit.iloc[0]
+			try:
+				self.lc.loc[_, 'ref_maglim'] = self.refmags[(
+					(self.refmags.field==int(self.lc.filename[_].split('_')[2])) &
+					(self.refmags.fid==fid) & (self.refmags.rcid==self.lc.rcid[_]))
+					].maglimit.iloc[0]
+			except: #TEMPORARY SOLUTION!
+				self.text += f'Could not find a ref mag for band {fid}, rcid {self.lc.rcid[_]}, field {self.lc.filename[_].split("_")[2]}, using the average of the field & band'
+				self.lc.loc[_, 'ref_maglim'] = self.refmags[(
+                                        (self.refmags.field==int(self.lc.filename[_].split('_')[2])) &
+                                        (self.refmags.fid==fid))].maglimit.mean()
 		return
 
 	def correct_baseline(self):
@@ -746,7 +766,7 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 									print(obj_loc.name, 'has no host data')
 									succes_attempts = pd.concat([bel_verdicts[bel_verdicts.verdict==22],
 																 with_fits[((with_fits.verdict&1024==0)|
-																 			(with_fits.verdict&4096==0))]],
+																			(with_fits.verdict&4096==0))]],
 																 ignore_index=True)
 								else:
 									if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
@@ -833,9 +853,10 @@ def get_host_data(objs, loc_list, dat_list):
 	#Select only the ones that are needed
 	sn_hosts = sn_hosts[sn_hosts.ztfname.isin(objs)].copy()
 	#Get the separation
-	sn_hosts['separation'] = SkyCoord(sn_hosts.sn_ra*u.deg, sn_hosts.sn_dec*u.deg,
-	                                  frame='icrs').separation(SkyCoord(sn_hosts.host_ra*u.deg,
-	                                                                    sn_hosts.host_dec*u.deg,
+	sn_hosts['separation'] = SkyCoord(sn_hosts.sn_ra, sn_hosts.sn_dec, unit=u.deg,
+	                                  frame='icrs').separation(SkyCoord(sn_hosts.host_ra,
+	                                                                    sn_hosts.host_dec,
+	                                                                    unit=u.deg,
 	                                                                    frame='icrs')).arcsecond
 	#Those without a host location get separation=-99
 	sn_hosts.loc[((sn_hosts.host_ra==270)&(sn_hosts.host_dec==-80)), 'separation'] = -99
