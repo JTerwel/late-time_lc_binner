@@ -2,29 +2,17 @@
 A program to stack and display late-time observations from the ZTF SN Ia dataset
 
 Author: Jacco Terwel
-Date: 26-02-23
+Date: 11-08-23
 
 This will be the final version -- A cleaned up version of _idr with the sims part integrated if possible
-
-- Major overhaul of the program
-- Rewritten binning part, removed obsolete functions, added filtering part
-- Redesigned how results are saved, should be easier & clearer now
-- Final version of the code
-
-Changes not on GitHub:
-- The data locations
-- The use of command_line args to state obj & save locations
-- Supression of warnings (due to different version of pandas being used here)
-- Change in Skycoord unit definition
-- Use the correct names for the simulation light curves (No ZTF in the name)
-- Fixed issue where final_verdict would crash if the object was not matched host data
-- Extra line to remove rows where rcid=NaN (Removes 2017 observations only)
-
-idr specific changes:
-- Made to work with ztfcosmoidr specific file format instead of raw FPbot files
-- Update in flags & cloudy implementation fix issue with removing too many data points
-- sep dist = 0 as this cut isn't used anymore
-- This version is quite chaotic, but should work properly - IF this is the final version, maybe a good idea to rewrite & comment before publishing the code
+Version is cleaned, can now choose between using idr files, simulations or raw fpbot files as input
+Can now choose to save lc_orig, lc_cor, bins (not needed for simulations for isnstance, takes up a lot of space)
+simulations are transformed into fpbot format
+simulations & fpbot still need to be transformed into a _idr-like format (cloudy cuts etc)
+Need to add that part of the code still
+Each input type has its own mode & load_source function
+should be easily adaptable for new cases (e.g. wanting to specify baseline region)
+can use the same extra_args at the end of the args list as in simulations if needed
 '''
 
 #Imports & global constants
@@ -68,13 +56,28 @@ def main():
 	saveloc = Path(sys.argv[2])
 	saveloc.mkdir(exist_ok=True)
 
-	#Set the location of the object csv files and list them
-	datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
+	#Set mode (type of input) & Set the location of the object files and list them if needed
+	modes = ['ZTFDR2', 'simulations', 'fpbot']
+	mode = config.loc['mode'][1]
+	if mode == modes[0]: #Files are in the DR2 format
+		datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
+	elif mode == modes[1]: #No files, instead a list of simsurvey lcs that need conversion
+		datafiles = simsurvey.LightcurveCollection(load=Path(sys.argv[1])/'lcs.pkl')
+		print(f'Sorry, {mode} cannot be used yet as it is not finished yet')
+		return
+	elif mode == modes[2]: #raw fpbot format that need conversion
+		datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
+		print(f'Sorry, {mode} cannot be used yet as it is not finished yet')
+		return
+	else:
+		print(f'Error: mode {mode} not recognised, please use one from the following list:')
+		print(modes)
+		print('Fatal error: cannot run program, stopping now')
+		return
 
 	#Load the reference image data
 	refmags = pd.read_csv(config.loc['refmags_loc'][1],
 		usecols=['field', 'fid', 'rcid', 'maglimit', 'startmjd', 'endmjd'])
-
 
 	#Load camera ZPs
 	read_opts = {'delim_whitespace': True, 'names': ['g', 'r', 'i'], 'comment': '#'}
@@ -92,10 +95,20 @@ def main():
 	tail_fit_chi2dof_tresh = ast.literal_eval(config.loc['tail_fit_chi2dof_tresh'][1])
 	min_sep = ast.literal_eval(config.loc['min_sep'][1])
 	min_successes = ast.literal_eval(config.loc['min_successes'][1])
-	cols = ['mjd', 'filter', 'flux', 'flux_err', 'ZP', 'flag', 'mag', 'mag_err', 'field_id', 'rcid', 'flux_offset', 'err_scale']
+	save_lc_and_bins = ast.literal_eval(config.loc['save_lc_and_bins'][1])
 
-	args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, cols, binsizes, phases,
-			 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh] for f in datafiles]
+	if mode == modes[0]:
+		args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, mode, binsizes, phases,
+				 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
+				 save_lc_and_bins] for f in datafiles]
+	elif mode == modes[1]:
+		fields = pd.read_fwf('/home/jaccoterwel/Documents/simsurvey/ZTF_Fields.txt', header=0)
+		args = [[_, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, cols, binsizes, phases,
+				method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
+				save_lc_and_bins, [datafiles[_], fields]] for _ in range(len(datafiles.lcs))]
+	else:
+		print(f'Error, {mode} not recognised when building the args list, stopping the program')
+		return
 
 	#Save all settings
 	data_settings = {'cuts': cuts}
@@ -140,7 +153,7 @@ class ztf_object:
 	- zp_rcid (DataFrame): camera zeropoints
 	- cuts (dict): used cuts for improved data_quality
 	- base_gap (float): min time (days) between observation & peak to be considered for the baseline correction
-	- cols (list): list of lc columns to read in
+	- mode (string): Input type to expect (Each has its own load_source function)
 	- binsizes (list): binsizes to use when binning
 	- phases (list): offsets to the 1st bin to use when binning
 	- method (int): method used to choose bin positioning (see bin_late_time)
@@ -167,13 +180,14 @@ class ztf_object:
 		self.zp_rcid = args[4]
 		self.cuts = args[5]
 		self.base_gap = args[6]
-		self.cols = args [7]
+		self.mode = args [7]
 		self.binsizes = args[8]
 		self.phases = args[9]
 		self.method = args[10]
 		self.earliest_tail_fit_start = args[11]
 		self.verdict_sigma = args[12]
 		self.tail_fit_chi2dof_tresh = args[13]
+		self.save_lc_and_bins = args[14]
 		self.text = 'Notes on ' + self.name + ':\n\n'
 		#Initialize the lists that will store the bins & verdicts
 		self.binlist = []
@@ -182,17 +196,22 @@ class ztf_object:
 		#Make the directory to save things in
 		self.saveloc.mkdir(exist_ok=True)
 		#Load the lc
-		self.load_source()
+		if self.mode == 'ZTFDR2':
+			self.load_source_dr2()
+		elif self.mode == 'simulations':
+			self.extra_args = args[15]
+			self.load_source_sims()
 		return
 
-	def load_source(self):
+	def load_source_dr2(self):
 		#Load the lc
+		cols = ['mjd', 'filter', 'flux', 'flux_err', 'ZP', 'flag', 'mag', 'mag_err', 'field_id', 'rcid', 'flux_offset', 'err_scale']
 		try:
-			self.lc = pd.read_csv(self.loc, usecols = self.cols, comment='#', delim_whitespace=True)
+			self.lc = pd.read_csv(self.loc, usecols = cols, comment='#', delim_whitespace=True)
 		except: #In case something goes wrong when reading in
 			self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
 			self.peak_mjd = 0
-			self.lc = pd.DataFrame(columns=self.cols)
+			self.lc = pd.DataFrame(columns=cols)
 			return
 		#Rename problematic columns
 		self.lc.rename(columns={'mjd':'obsmjd', 'filter':'obs_filter', 'flux':'Fratio', 'flux_err':'Fratio_err', 'field_id':'fieldid'}, inplace=True)
@@ -203,17 +222,126 @@ class ztf_object:
 		self.match_ref_im()
 		#Find the peak of the SN
 		self.find_peak_date()
-		#Save this lc before bad points are removed
+		#Save this lc before bad points are removed if wanted
 		nr_points = [len(self.lc[self.lc.obs_filter.str.contains('g')]),
 					 len(self.lc[self.lc.obs_filter.str.contains('r')]),
 					 len(self.lc[self.lc.obs_filter.str.contains('i')])]
-		self.lc.to_csv(self.saveloc/'lc_orig.csv')
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_orig.csv')
 		self.imp_df = self.imp_df.append({'name':'peak_mjd_before_baseline', 'val':self.peak_mjd},
 										 ignore_index=True)
 		#apply baseline corrections
 		self.correct_baseline()
-		#Save the baseline corrected lc containing only useful points
-		self.lc.to_csv(self.saveloc/'lc_cor.csv')
+		#Save the baseline corrected lc containing only useful points if wanted
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_cor.csv')
+		if self.lc.empty:
+			self.text += '-----\nNo good datapoints left, no binning can be performed\n'
+		#Recheck the peak of the SN in case the relevant point was removed
+		tmp1 = self.peak_mjd
+		tmp2 = self.peak_mag
+		self.find_peak_date()
+		self.imp_df = self.imp_df.append({'name':'peak_mjd_after_baseline', 'val':self.peak_mjd},
+										 ignore_index=True)
+		self.imp_df = self.imp_df.append({'name':'removed_g',
+										  'val':nr_points[0]-len(self.lc[self.lc.obs_filter.str.contains('g')])},
+										 ignore_index=True)
+		self.imp_df = self.imp_df.append({'name':'removed_r',
+										  'val':nr_points[1]-len(self.lc[self.lc.obs_filter.str.contains('r')])},
+										 ignore_index=True)
+		self.imp_df = self.imp_df.append({'name':'removed_i',
+										  'val':nr_points[2]-len(self.lc[self.lc.obs_filter.str.contains('i')])},
+										 ignore_index=True)
+		if ((self.peak_mjd != tmp1) | (self.peak_mag != tmp2)):
+			self.text += f'NOTE: Peak has changed after baseline corrections by {self.peak_mjd-tmp1} days and {self.peak_mag-tmp2} mags\n'
+		self.check_refmjd()
+		return
+
+	def load_source_sims(self):
+		#Read in simulated lc & convert to fpbot format
+		self.lc = make_fpbot_df(self.extra_args[0], self.extra_args[1])
+		#Remove rows with rcid = NaN
+		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
+		#Add flags (dr2 style, should replace calc_cloudy & apply cuts) and transform to dr2-like df
+		#Might want to go directly to correct format later when I know how to do so easily
+		#Add cloudy, cuts, & refmags
+		self.calc_cloudy()
+		self.apply_cuts()
+		self.match_ref_im()
+		#Find the peak of the SN
+		self.find_peak_date()
+		#Save this lc before bad points are removed if wanted
+		nr_points = [len(self.lc[self.lc.obs_filter.str.contains('g')]),
+					 len(self.lc[self.lc.obs_filter.str.contains('r')]),
+					 len(self.lc[self.lc.obs_filter.str.contains('i')])]
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_orig.csv')
+		self.imp_df = self.imp_df.append({'name':'peak_mjd_before_baseline', 'val':self.peak_mjd},
+										 ignore_index=True)
+		#apply baseline corrections
+		self.correct_baseline()
+		#Save the baseline corrected lc containing only useful points if wanted
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_cor.csv')
+		if self.lc.empty:
+			self.text += '-----\nNo good datapoints left, no binning can be performed\n'
+		#Recheck the peak of the SN in case the relevant point was removed
+		tmp1 = self.peak_mjd
+		tmp2 = self.peak_mag
+		self.find_peak_date()
+		self.imp_df = self.imp_df.append({'name':'peak_mjd_after_baseline', 'val':self.peak_mjd},
+										 ignore_index=True)
+		self.imp_df = self.imp_df.append({'name':'removed_g',
+										  'val':nr_points[0]-len(self.lc[self.lc.obs_filter.str.contains('g')])},
+										 ignore_index=True)
+		self.imp_df = self.imp_df.append({'name':'removed_r',
+										  'val':nr_points[1]-len(self.lc[self.lc.obs_filter.str.contains('r')])},
+										 ignore_index=True)
+		self.imp_df = self.imp_df.append({'name':'removed_i',
+										  'val':nr_points[2]-len(self.lc[self.lc.obs_filter.str.contains('i')])},
+										 ignore_index=True)
+		if ((self.peak_mjd != tmp1) | (self.peak_mag != tmp2)):
+			self.text += f'NOTE: Peak has changed after baseline corrections by {self.peak_mjd-tmp1} days and {self.peak_mag-tmp2} mags\n'
+		self.check_refmjd()
+		return
+
+	def load_source_fpbot(self):
+		cols = ['obsmjd', 'filter', 'Fratio', 'Fratio.err', 'mag', 'mag_err', 'upper_limit',
+				'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzprms', 'airmass', 'nmatches',
+				'rcid', 'fieldid', 'infobits', 'filename']
+		#Load the lc
+		try:
+			self.lc = pd.read_csv(self.loc, usecols = cols, comment='#')
+		except: #In case something goes wrong when reading in
+			self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
+			self.peak_mjd = 0
+			self.lc = pd.DataFrame(columns=cols)
+			return
+		#Rename problematic columns
+		self.lc.rename(columns={'filter':'obs_filter', 'Fratio.err':'Fratio_err',
+						   		'ampl.err':'ampl_err'}, inplace=True)
+		#Remove rows with rcid = NaN
+		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
+		#Add flags (dr2 style, should replace calc_cloudy & apply cuts) and transform to dr2-like df
+		#Add cloudy, cuts, & refmags
+		self.calc_cloudy()
+		self.apply_cuts()
+		self.match_ref_im()
+		#Find the peak of the SN
+		self.find_peak_date()
+		#Save this lc before bad points are removed if wanted
+		nr_points = [len(self.lc[self.lc.obs_filter.str.contains('g')]),
+					 len(self.lc[self.lc.obs_filter.str.contains('r')]),
+					 len(self.lc[self.lc.obs_filter.str.contains('i')])]
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_orig.csv')
+		self.imp_df = self.imp_df.append({'name':'peak_mjd_before_baseline', 'val':self.peak_mjd},
+										 ignore_index=True)
+		#apply baseline corrections
+		self.correct_baseline()
+		#Save the baseline corrected lc containing only useful points if wanted
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_cor.csv')
 		if self.lc.empty:
 			self.text += '-----\nNo good datapoints left, no binning can be performed\n'
 		#Recheck the peak of the SN in case the relevant point was removed
@@ -477,7 +605,8 @@ def check_object(args):
 		obj_data.bin_all()
 		#Save the bins
 		all_bins = pd.concat(obj_data.binlist, ignore_index=True)
-		all_bins.to_csv(obj_data.saveloc / 'bins.csv', index=False)
+		if obj_data.save_lc_and_bins:
+			all_bins.to_csv(obj_data.saveloc / 'bins.csv', index=False)
 		#Run the filtering program
 		obj_data.check_bins()
 		#Save the result of the filtering program
@@ -858,6 +987,61 @@ def flux2mag(flux, zp):
 
 def dflux2dmag(flux, flux_err):
 	return 2.5*flux_err / (np.log(10)*flux)
+
+
+#*----------------------------------------------*
+#| Functions specific for using the simulations |
+#*----------------------------------------------*
+
+def make_fpbot_df(lc, fields):
+	#Save the lightcurve in an FPbot-style csv file
+	df = pd.DataFrame()
+	#Calculate derived values
+	observatory = EarthLocation(lat=33.35627096604836*u.deg, lon=-116.86481294596469*u.deg, height=1700*u.m)
+	mags, mag_errs, uplims = flux2mag_fpbot(np.array(lc['flux']), np.array(lc['fluxerr']),
+									  np.array(lc['zp']))
+	t = Time(lc['time'], format='mjd')
+	airmass = calc_airmass([fields[fields.ID==i].RA.values[0] for i in lc['field']],
+						   [fields[fields.ID==i].Dec.values[0] for i in lc['field']],
+						   t, observatory)
+	decday = [f'{i.isot[0:4]}{i.isot[5:7]}{i.isot[8:10]}{str(float(i.isot[11:13])/24+float(i.isot[14:16])/(24*60)+(float(i.isot[17:]))/(24*3600))[2:8]}' for i in t]
+	#Put all values in the DataFrame & save it
+	df['obsmjd'] = lc['time']
+	df['obs_filter'] = lc['band']
+	df['Fratio'] = lc['flux'] / 10**(0.4*lc['zp'])
+	df['Fratio_err'] = lc['fluxerr'] / 10**(0.4*lc['zp'])
+	df['mag'] = mags
+	df['mag_err'] = mag_errs
+	df['upper_limit'] = uplims
+	df['ampl_err'] = lc['fluxerr']
+	df['chi2dof'] = 1
+	df['seeing'] = 2
+	df['magzp'] = [25.8 if i[-1]=='g' else 25.9 if i[-1]=='r' else 25.5 for i in lc['band']]
+	df['magzprms'] = 0.04
+	df['airmass'] = airmass
+	df['nmatches'] = [130 if i>=19 else 20 for i in -2.5*np.log10(5*lc['fluxerr'])+lc['zp']]
+	df['rcid'] = lc['ccd']
+	df['fieldid'] = lc['field']
+	df['infobits'] = 0
+	df['filename'] = [f"ztf_{decday[i]}_{'%06.f'%lc['field'][i]}_z{lc['band'][i][-1]}_c{'%02.f'%int(lc['ccd'][i]/4+1)}_o.fits" for i in range(len(decday))]
+	return df
+
+def flux2mag_fpbot(flux, fluxerr, zp):
+	#Convert flux, fluxerr to mag, magerr, upper limmit
+	#Give 5 sigma upper limit when flux < 5*fluxerr, value = 99: not applicable
+	mag = np.ones_like(flux)*99
+	magerr = np.ones_like(flux)*99
+	uplim = np.ones_like(flux)*99
+	mask = flux>=5*fluxerr
+	mag[mask] = -2.5*np.log10(flux[mask])+zp[mask]
+	magerr[mask] = np.abs(-2.5*fluxerr[mask] / (flux[mask]*np.log(10)))
+	uplim[~mask] = -2.5*np.log10(5*fluxerr[~mask])+zp[~mask]
+	return mag, magerr, uplim
+
+def calc_airmass(ra, dec, t, observatory):
+	#Calculate the rmass at a given location & time
+	pointings = SkyCoord(ra, dec, unit='deg')
+	return [pointings[i].transform_to(AltAz(obstime=t[i], location=observatory)).secz for i in range(len(t))]
 
 if (__name__ == "__main__"):
 	main()

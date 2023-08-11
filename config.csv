@@ -1,3 +1,4 @@
+mode			'ZTFDR2'									#Input type (currently works with 'ZTFDR2', 'simulations' and 'fpbot')
 refmags_loc		'/home/jaccoterwel/Documents/Late-time_obs_binning/ref_im_data.csv'		#Location of the reference file magnitudes
 zp_rcid_loc		'/home/jaccoterwel/Documents/Late-time_obs_binning/zp_thresholds_quadID.txt'	#Location of the file with the zeropoints for each rcid
 loc_list_loc		'/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_locs.csv'		#Location of the file with the host galaxy locations
@@ -13,4 +14,4 @@ verdict_sigma		5										#sigma = flux/flux_err treshold for bin to be consider
 tail_fit_chi2dof_tresh	5										#Treshold for tail fit to be considered successful
 min_sep			0										#Minimal SN - host nucleus separation in arcsec
 min_successes		4										#Minimal nr. of successful attempts needed per object for late-time detection to be considered significant
-
+save_lc_and_bins	True										#Save uncorrected lc, baseline corrected lc (points used in the binning program), and bins
