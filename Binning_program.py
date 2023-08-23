@@ -2,16 +2,18 @@
 A program to stack and display late-time observations from the ZTF SN Ia dataset
 
 Author: Jacco Terwel
-Date: 11-08-23
+Date: 23-08-23
 
 This will be the final version -- A cleaned up version of _idr with the sims part integrated if possible
 Version is cleaned, can now choose between using idr files, simulations or raw fpbot files as input
-Can now choose to save lc_orig, lc_cor, bins (not needed for simulations for isnstance, takes up a lot of space)
+Can now choose to save lc_orig, lc_cor, bins (not needed for simulations for instance, takes up a lot of space)
 simulations are transformed into fpbot format
-simulations & fpbot still need to be transformed into a _idr-like format (cloudy cuts etc)
-Need to add that part of the code still
-Each input type has its own mode & load_source function
-should be easily adaptable for new cases (e.g. wanting to specify baseline region)
+simulations & fpbot are transformed into a _idr-like format (cloudy cuts etc)
+Added that part of the code, has been tested but not uploaded yet
+(small differences between idr & fpbot style to be checked a bit further, but that doesn't seem to have too much of an effect)
+Each input type has its own mode & load_source method
+should be easily adaptable for new cases by providing a new mode an load_source method
+(e.g. wanting to specify baseline region)
 can use the same extra_args at the end of the args list as in simulations if needed
 '''
 
@@ -23,7 +25,8 @@ from numpy import nan, inf
 import pandas as pd
 import multiprocessing as mp
 from pathlib import Path
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
 import astropy.units as u
 from tqdm import tqdm
 from lmfit import Model, Parameters
@@ -62,13 +65,10 @@ def main():
 	if mode == modes[0]: #Files are in the DR2 format
 		datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
 	elif mode == modes[1]: #No files, instead a list of simsurvey lcs that need conversion
+		import simsurvey
 		datafiles = simsurvey.LightcurveCollection(load=Path(sys.argv[1])/'lcs.pkl')
-		print(f'Sorry, {mode} cannot be used yet as it is not finished yet')
-		return
 	elif mode == modes[2]: #raw fpbot format that need conversion
 		datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
-		print(f'Sorry, {mode} cannot be used yet as it is not finished yet')
-		return
 	else:
 		print(f'Error: mode {mode} not recognised, please use one from the following list:')
 		print(modes)
@@ -97,15 +97,17 @@ def main():
 	min_successes = ast.literal_eval(config.loc['min_successes'][1])
 	save_lc_and_bins = ast.literal_eval(config.loc['save_lc_and_bins'][1])
 
-	if mode == modes[0]:
+	if ((mode == modes[0]) | (mode == modes[2])):
 		args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, mode, binsizes, phases,
 				 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
 				 save_lc_and_bins] for f in datafiles]
+		nr_files = len(datafiles)
 	elif mode == modes[1]:
-		fields = pd.read_fwf('/home/jaccoterwel/Documents/simsurvey/ZTF_Fields.txt', header=0)
-		args = [[_, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, cols, binsizes, phases,
+		fields = pd.read_fwf(config.loc['fields_list_loc'][1], header=0)
+		args = [[_, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, mode, binsizes, phases,
 				method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
 				save_lc_and_bins, [datafiles[_], fields]] for _ in range(len(datafiles.lcs))]
+		nr_files = len(datafiles.lcs)
 	else:
 		print(f'Error, {mode} not recognised when building the args list, stopping the program')
 		return
@@ -121,14 +123,17 @@ def main():
 	#use each cpu core separately & keep track of progress
 	pool = mp.Pool(mp.cpu_count())
 
-	list(tqdm(pool.imap_unordered(check_object, args), total=len(datafiles)))
+	list(tqdm(pool.imap_unordered(check_object, args), total=nr_files))
 	pool.close()
 	pool.join()
 	print('All objects binned & evaluated, putting objects through the final filter')
 	#Load the host data
 	loc_list = config.loc['loc_list_loc'][1]
 	dat_list = config.loc['dat_list_loc'][1]
-	host_dat = get_host_data([i.name.rsplit('_S',1)[0] for i in datafiles], loc_list, dat_list)
+	if mode == 'simulations':
+		host_dat = [None for f in saveloc.rglob('*') if f.is_dir()]
+	else:
+		host_dat = get_host_data([f.name for f in saveloc.rglob('*') if f.is_dir()], loc_list, dat_list)
 	#Give the final verdicts
 	all_obs = [f for f in saveloc.rglob('*') if f.is_dir()]
 	final_verdicts = give_final_verdicts(all_obs, host_dat, min_sep, min_successes)
@@ -166,13 +171,23 @@ class ztf_object:
 	- binlist (list): list of binning attempts, one for each filter, binsize, phase cobination
 	- verdictlist (list): list of verdicts for each binning attempt in binlist
 	- imp_df (DataFrame): df containing other values to save (peak_date, baseline_corrections)
+	- extra_args (list): list of extra arguments needed for loading the specific input type
 	'''
 
 	def __init__(self, args):
 		#Unpack args into easier to use names
-		self.name = args[0].name.rsplit('_L',1)[0]
-		if (('ZTF' not in self.name) & ('ztf' not in self.name)):
-			self.name = args[0].name[:-4] #Use correct names for simulation lc
+		self.mode = args [7]
+		#Naming scheme is chosen based on mode, if not recognised go with the default option
+		if self.mode == 'ZTFDR2':
+			self.name = args[0].name.rsplit('_L',1)[0]
+			if (('ZTF' not in self.name) & ('ztf' not in self.name)):
+				self.name = args[0].name[:-4]
+		elif self.mode == 'simulations':
+			self.name = f'lc_{args[0]}'
+		elif self.mode == 'fpbot':
+			self.name = args[0].name.rsplit('_SNT',1)[0]
+		else:
+			self.name = args[0]
 		self.loc = args[0]
 		self.refmags = args[1]
 		self.saveloc = args[2] / self.name
@@ -180,7 +195,6 @@ class ztf_object:
 		self.zp_rcid = args[4]
 		self.cuts = args[5]
 		self.base_gap = args[6]
-		self.mode = args [7]
 		self.binsizes = args[8]
 		self.phases = args[9]
 		self.method = args[10]
@@ -201,10 +215,12 @@ class ztf_object:
 		elif self.mode == 'simulations':
 			self.extra_args = args[15]
 			self.load_source_sims()
+		elif self.mode == 'fpbot':
+			self.load_source_fpbot()
 		return
 
 	def load_source_dr2(self):
-		#Load the lc
+		#Load the lc assuming a DR2 style dataframe
 		cols = ['mjd', 'filter', 'flux', 'flux_err', 'ZP', 'flag', 'mag', 'mag_err', 'field_id', 'rcid', 'flux_offset', 'err_scale']
 		try:
 			self.lc = pd.read_csv(self.loc, usecols = cols, comment='#', delim_whitespace=True)
@@ -260,14 +276,26 @@ class ztf_object:
 	def load_source_sims(self):
 		#Read in simulated lc & convert to fpbot format
 		self.lc = make_fpbot_df(self.extra_args[0], self.extra_args[1])
+		# Update the filter entries for consistency.
+		self.lc.loc[self.lc.obs_filter == 'ZTF g', 'obs_filter'] = 'ztfg'
+		self.lc.loc[self.lc.obs_filter == 'ZTF r', 'obs_filter'] = 'ztfr'
+		self.lc.loc[self.lc.obs_filter == 'ZTF i', 'obs_filter'] = 'ztfi'
+		self.lc.loc[self.lc.obs_filter == 'ZTF_g', 'obs_filter'] = 'ztfg'
+		self.lc.loc[self.lc.obs_filter == 'ZTF_r', 'obs_filter'] = 'ztfr'
+		self.lc.loc[self.lc.obs_filter == 'ZTF_i', 'obs_filter'] = 'ztfi'
 		#Remove rows with rcid = NaN
 		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
-		#Add flags (dr2 style, should replace calc_cloudy & apply cuts) and transform to dr2-like df
-		#Might want to go directly to correct format later when I know how to do so easily
-		#Add cloudy, cuts, & refmags
+		# Remove duplicate observations: (uses field, rcid, filter and mjd)
+		self.lc = self.lc.drop_duplicates(subset=['fieldid','obs_filter','rcid','obsmjd'], keep='last')
+		self.lc = self.lc.reset_index(drop=True)
+		#Add flags and transform to dr2-like df, add cloudy, cuts, & refmags, Remove points where the SN is not on the chip
+		#This should remove nothing important
 		self.calc_cloudy()
 		self.apply_cuts()
+		if len(self.lc.loc[(self.lc.target_x<0) | (self.lc.target_y<0)])>0:
+			self.lc = self.lc.loc[(self.lc.target_x>=0) & (self.lc.target_y>=0)]
 		self.match_ref_im()
+		#zp already at 30, no need to renormalise
 		#Find the peak of the SN
 		self.find_peak_date()
 		#Save this lc before bad points are removed if wanted
@@ -306,10 +334,10 @@ class ztf_object:
 		return
 
 	def load_source_fpbot(self):
-		cols = ['obsmjd', 'filter', 'Fratio', 'Fratio.err', 'mag', 'mag_err', 'upper_limit',
-				'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzprms', 'airmass', 'nmatches',
-				'rcid', 'fieldid', 'infobits', 'filename']
-		#Load the lc
+		#Load the lc assuming a raw fpbot style dataframe
+		cols = ['obsmjd', 'filter', 'Fratio', 'Fratio.err', 'mag', 'mag_err', 'upper_limit', 'ampl',
+				'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzpunc', 'magzprms', 'airmass', 'nmatches',
+				'rcid', 'fieldid', 'infobits', 'filename', 'exptime', 'sigma', 'sigma.err', 'target_x', 'target_y']
 		try:
 			self.lc = pd.read_csv(self.loc, usecols = cols, comment='#')
 		except: #In case something goes wrong when reading in
@@ -319,14 +347,28 @@ class ztf_object:
 			return
 		#Rename problematic columns
 		self.lc.rename(columns={'filter':'obs_filter', 'Fratio.err':'Fratio_err',
-						   		'ampl.err':'ampl_err'}, inplace=True)
+						   		'ampl.err':'ampl_err', 'sigma.err':'sigma_err'}, inplace=True)
+		# Update the filter entries for consistency.
+		self.lc.loc[self.lc.obs_filter == 'ZTF g', 'obs_filter'] = 'ztfg'
+		self.lc.loc[self.lc.obs_filter == 'ZTF r', 'obs_filter'] = 'ztfr'
+		self.lc.loc[self.lc.obs_filter == 'ZTF i', 'obs_filter'] = 'ztfi'
+		self.lc.loc[self.lc.obs_filter == 'ZTF_g', 'obs_filter'] = 'ztfg'
+		self.lc.loc[self.lc.obs_filter == 'ZTF_r', 'obs_filter'] = 'ztfr'
+		self.lc.loc[self.lc.obs_filter == 'ZTF_i', 'obs_filter'] = 'ztfi'
 		#Remove rows with rcid = NaN
 		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
-		#Add flags (dr2 style, should replace calc_cloudy & apply cuts) and transform to dr2-like df
-		#Add cloudy, cuts, & refmags
+		# Remove duplicate observations: (uses field, rcid, filter and mjd)
+		self.lc = self.lc.drop_duplicates(subset=['fieldid','obs_filter','rcid','obsmjd'], keep='last')
+		self.lc = self.lc.reset_index(drop=True)
+		#Add flags and transform to dr2-like df, add cloudy, cuts, & refmags, Remove points where the SN is not on the chip
 		self.calc_cloudy()
 		self.apply_cuts()
+		if len(self.lc.loc[(self.lc.target_x<0) | (self.lc.target_y<0)])>0:
+			self.lc = self.lc.loc[(self.lc.target_x>=0) & (self.lc.target_y>=0)]
+		#Should have everything that is actually needed already in the correct column names, if not check & change here
 		self.match_ref_im()
+		#Put everything to zp 30
+		self.renormalise_fpbot_lc()
 		#Find the peak of the SN
 		self.find_peak_date()
 		#Save this lc before bad points are removed if wanted
@@ -404,7 +446,7 @@ class ztf_object:
 					(self.refmags.fid==fid) & (self.refmags.rcid==self.lc.rcid[_]))
 					].maglimit.iloc[0]
 			except: #TEMPORARY SOLUTION!
-				self.text += f'Could not find a ref mag for band {fid}, rcid {self.lc.rcid[_]}, field {self.lc.fieldid[_]}, using the average of the field & band'
+				self.text += f'Could not find a ref mag for band {fid}, rcid {self.lc.rcid[_]}, field {self.lc.fieldid[_]}, using the average of the field & band\n'
 				self.lc.loc[_, 'ref_maglim'] = self.refmags[(
 					(self.refmags.field==self.lc.fieldid[_]) &
 					(self.refmags.fid==fid))].maglimit.mean()
@@ -495,11 +537,108 @@ class ztf_object:
 						self.imp_df = self.imp_df.append({'name':f'b{band}f{field}rcid{rcid}_err', 'val':basel_err},
 														 ignore_index=True)
 					else:
-						self.text += f'The combination of filter {band}, field {field}, and rcid {rcid} only has {len(this_combo)} points available. These observations are removed\n'
+						self.text += f'The combination of filter {band}, field {field}, and rcid {rcid} only has {len(nondets)} points available for the baseline correction. These observations are removed\n'
 						self.lc.drop(self.lc[((self.lc.obs_filter.str.contains(band))&
 											  (self.lc.fieldid == field)&
 											  (self.lc.rcid == rcid))].index, inplace=True)
 		return
+
+	def calc_cloudy(self):
+		#Cloudy has 4 conditions, pass 1 & the point should be removed
+		#(Conditions from Adam Miller / Mat Smith)
+	    #They get values 1,2,4,8 to keep track of which condition removed each point,
+	    #& 16 for no_data (field=-99)
+		# Define cloudy; default to the IPAC values
+		airmass_slope = [0.20, 0.15, 0.07]
+		zprms_cut     = [0.06, 0.05, 0.06]
+		nmatch_cut    = [80, 120, 100]
+		magzp         = self.lc.magzp - 2.5*np.log10(self.lc.exptime/30)
+		magzp_cut     = [26.8, 26.75, 26.1]
+		#Find the cloudy points
+		cloudy = np.zeros(len(self.lc))
+		#1) magzp > val I - val II * airmass      Wrong zp
+		cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & \
+						 (magzp > magzp_cut[0]-airmass_slope[0]*self.lc.airmass)) | \
+						((self.lc.obs_filter.str.contains('r')) & \
+						 (magzp > magzp_cut[1]-airmass_slope[1]*self.lc.airmass)) | \
+						((self.lc.obs_filter.str.contains('i')) & \
+						 (magzp > magzp_cut[2]-airmass_slope[2]*self.lc.airmass)))] += 1
+		#2) magzprms > val III                    Spread in zp too large
+		cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & (self.lc.magzprms > zprms_cut[0])) | \
+						((self.lc.obs_filter.str.contains('r')) & (self.lc.magzprms > zprms_cut[1])) | \
+						((self.lc.obs_filter.str.contains('i')) & (self.lc.magzprms > zprms_cut[2])))] += 2
+		#3) nmatches < val IV                     Not enough catalog sources matched for alignment etc.
+		cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & (self.lc.nmatches < nmatch_cut[0])) | \
+						((self.lc.obs_filter.str.contains('r')) & (self.lc.nmatches < nmatch_cut[1])) | \
+						((self.lc.obs_filter.str.contains('i')) & (self.lc.nmatches < nmatch_cut[2])))] += 4
+		#4) magzp < zp_rcid - val II * airmass    Wrong zp
+		for _ in self.lc.rcid.unique():
+			cloudy[np.where(((self.lc.obs_filter.str.contains('g')) & (self.lc.rcid == _) & \
+							 (magzp < self.zp_rcid.g.iloc[int(_)]-airmass_slope[0]*self.lc.airmass)) | \
+							((self.lc.obs_filter.str.contains('r')) & (self.lc.rcid == _) & \
+							 (magzp < self.zp_rcid.r.iloc[int(_)]-airmass_slope[1]*self.lc.airmass)) | \
+							((self.lc.obs_filter.str.contains('i')) & (self.lc.rcid == _) & \
+							 (magzp < self.zp_rcid.i.iloc[int(_)]-airmass_slope[2]*self.lc.airmass)))] += 8
+		#5) field = -99                           No data
+		cloudy[np.where(self.lc.fieldid==-99)] += 16
+		self.lc['cloudy'] = cloudy
+		return
+
+	def apply_cuts(self):
+		'''
+		Quality cuts applied:
+		1.    flux_err is unphysically small (<2)
+		2.    chi2 of fit is large (>3)
+		4.    infofits failure
+		8.    cloudy criteria failed
+		'''
+		#Flag all data points as good or bad
+		self.lc['flag'] = 0
+		ampl_err_min   = 2.001
+		ampl_s2n_max   = 1e5
+		ampl_err_max   = 1e6
+		seeing_max     = 3     # Note IPAC recommends a cut at 4
+		airmass_max    = 2
+		moonillf_max   = 0.5
+		field_max      = 999
+		self.lc['ampl_s2n'] = self.lc.ampl/self.lc.ampl_err
+		self.lc.loc[(self.lc.ampl_err<ampl_err_min) | (self.lc.ampl_s2n>ampl_s2n_max) | \
+					(self.lc.ampl_err>ampl_err_max) | (np.isnan(self.lc.ampl_err)), 'flag'] += 1
+		self.lc.loc[self.lc.chi2dof>3, 'flag'] += 2
+		#Unset non-terminal failure bits
+		unset_bits = [25, 22] # NB: unset_bits must be in reverse chronological order.
+		for bit in unset_bits:
+			self.lc.infobits[self.lc.infobits>=2**bit] -= 2**bit
+		self.lc.loc[self.lc.infobits>0,'flag'] += 4
+		self.lc.loc[self.lc.cloudy>0, 'flag'] += 8
+		self.lc.loc[self.lc['seeing']>seeing_max, 'flag'] += 64
+		#Apply the cuts
+		self.lc = self.lc[self.lc.flag == 0]
+		return
+
+	def renormalise_fpbot_lc(self, new_ZP=30.):
+		# Take the input light-curve; determine updated fluxes
+		# We do this for ampl and sigma
+		self.lc.Fratio, self.lc.Fratio_err = self.renormalise_flux(self.lc.ampl.values, self.lc.ampl_err.values, self.lc.magzp.values)
+		self.lc.sigma, self.lc.sigma_err = self.renormalise_flux(self.lc.sigma.values, self.lc.sigma_err.values, self.lc.magzp.values)
+		self.lc['ZP'] = new_ZP
+		# ----------- #
+		# Calculate limiting magnitude: this uses the statistical only flux_errors.
+		# Also Fix objects with no ZP_err.
+		# ----
+		# Note that our estimate differs from the header by 0.03-0.05
+		# We add 1e-10 in quadrature to deal with things with flux_err==0.
+		# ----------- #
+		S2N_threshold = 5
+		self.lc['mag_lim'] = self.lc.apply(lambda row: -2.5*np.log10(S2N_threshold*row['Fratio_err'])+row['ZP'] if \
+							row['Fratio']/(np.sqrt(row['Fratio_err']**2+1e-10**2))<S2N_threshold else float("NAN"), axis=1)
+		self.lc['magzpunc'] = self.lc.apply(lambda row: 1e-5 if row['magzpunc']<1e-5 else row['magzpunc'], axis=1)
+		return
+
+	def renormalise_flux(self, flux, flux_err, zp, new_ZP=30.):
+		flux_new    = flux*10**(-0.4*(zp - new_ZP))
+		fluxerr_new = flux_new*flux_err/flux            # sigma_f/f = sigma_f_new/f_new
+		return flux_new, fluxerr_new
 
 	def find_peak_date(self):
 		'''
@@ -625,9 +764,20 @@ def give_final_verdicts(obj_list, host_dat, min_sep, min_successes):
 	#Give a final verdict for each object & save them
 	final_verdicts = pd.DataFrame()
 	for _ in obj_list:
-		final_verdicts = final_verdicts.append(final_verdict(_, host_dat[host_dat.ztfname==_.name],
-															 min_sep, min_successes),
-											   ignore_index=True)
+		if None in host_dat: #For the simulations
+			final_verdicts = final_verdicts.append(final_verdict(_, [None],
+																 min_sep, min_successes),
+												   ignore_index=True)
+		else:
+			try:
+				final_verdicts = final_verdicts.append(final_verdict(_, host_dat[host_dat.ztfname==_.name],
+																	 min_sep, min_successes),
+													   ignore_index=True)
+			except:
+				print('Error: host data not recognised, assuming none to create final verdicts')
+				final_verdicts = final_verdicts.append(final_verdict(_, [None],
+																	 min_sep, min_successes),
+													   ignore_index=True)
 	return final_verdicts
 
 
@@ -673,7 +823,7 @@ def bin_late_time(data, band, binsize, phase, method, late_time):
 		if (((method == 3) | (method == 4)) &
 				(len(data[(data.obsmjd>=newbin_stop) &
 						  (data.obsmjd<newbin_stop+0.1*binsize)])!=0) &
-				(len(data[(data.obsmjd>=newbin_stop) & 
+				(len(data[(data.obsmjd>=newbin_stop) &
 						  (data.obsmjd<newbin_stop+0.1*binsize)])<3) &
 				(len(data[(data.obsmjd>=newbin_stop+0.1*binsize) &
 						  (data.obsmjd<newbin_stop+2*binsize)])==0)):
@@ -860,7 +1010,9 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 							if False not in [((i&1024!=0) & (i&4096!=0)) for i in with_fits.verdict.values]: #Are any of the fits inconsistent with a normal Ia tail?
 								normal = True
 								#Only failed fits might be interesting --> successfull attempts have verdict are 22 or contain 64
-								if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
+								if None in host_dat: #When running the simulations
+									succes_attempts = bel_verdicts[((bel_verdicts.verdict&64!=0) | (bel_verdicts.verdict==22))]
+								elif len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 									too_nuc = False
 									print(obj_loc.name, 'has no host data')
 									succes_attempts = bel_verdicts[((bel_verdicts.verdict&64!=0) | (bel_verdicts.verdict==22))]
@@ -873,7 +1025,13 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 							else:
 								normal = False
 								#Failed & non normal Ia fits are interesting --> successfull attempts are those with verdict 22 or with_fits not containing 1024 or 4096
-								if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
+								if None in host_dat: #When running the simulations
+									too_nuc = False
+									succes_attempts = pd.concat([bel_verdicts[bel_verdicts.verdict==22],
+																 with_fits[((with_fits.verdict&1024==0)|
+																			(with_fits.verdict&4096==0))]],
+																 ignore_index=True)
+								elif len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 									too_nuc = False
 									print(obj_loc.name, 'has no host data')
 									succes_attempts = pd.concat([bel_verdicts[bel_verdicts.verdict==22],
@@ -891,7 +1049,11 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 																	 ignore_index=True)
 					else:
 						pos_tail = False
-						if len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
+						if None in host_dat: #When running the simulations
+							too_nuc = False
+							succes_attempts = bel_verdicts[bel_verdicts.verdict==22]
+
+						elif len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 							too_nuc = False
 							print(obj_loc.name, 'has no host data')
 							succes_attempts = bel_verdicts[bel_verdicts.verdict==22]
@@ -1008,8 +1170,9 @@ def make_fpbot_df(lc, fields):
 	#Put all values in the DataFrame & save it
 	df['obsmjd'] = lc['time']
 	df['obs_filter'] = lc['band']
-	df['Fratio'] = lc['flux'] / 10**(0.4*lc['zp'])
-	df['Fratio_err'] = lc['fluxerr'] / 10**(0.4*lc['zp'])
+	df['ampl'] = lc['flux']
+	df['Fratio'] = lc['flux']
+	df['Fratio_err'] = lc['fluxerr']
 	df['mag'] = mags
 	df['mag_err'] = mag_errs
 	df['upper_limit'] = uplims
@@ -1017,12 +1180,17 @@ def make_fpbot_df(lc, fields):
 	df['chi2dof'] = 1
 	df['seeing'] = 2
 	df['magzp'] = [25.8 if i[-1]=='g' else 25.9 if i[-1]=='r' else 25.5 for i in lc['band']]
+	df['magzpunc'] = 0.1
 	df['magzprms'] = 0.04
 	df['airmass'] = airmass
 	df['nmatches'] = [130 if i>=19 else 20 for i in -2.5*np.log10(5*lc['fluxerr'])+lc['zp']]
 	df['rcid'] = lc['ccd']
 	df['fieldid'] = lc['field']
 	df['infobits'] = 0
+	df['exptime'] = 30
+	df['target_x'] = 5
+	df['target_y'] = 5
+	df['ZP'] = lc['zp']
 	df['filename'] = [f"ztf_{decday[i]}_{'%06.f'%lc['field'][i]}_z{lc['band'][i][-1]}_c{'%02.f'%int(lc['ccd'][i]/4+1)}_o.fits" for i in range(len(decday))]
 	return df
 
