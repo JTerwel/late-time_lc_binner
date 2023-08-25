@@ -235,6 +235,7 @@ class ztf_object:
 		self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
 		#Cloudy & cuts are in flag, Undo idr baseline correction & add refmags
 		self.undo_correction()
+		self.lc = self.lc[self.lc.flag&sum(self.cuts)==0]
 		self.match_ref_im()
 		#Find the peak of the SN
 		self.find_peak_date()
@@ -292,6 +293,7 @@ class ztf_object:
 		#This should remove nothing important
 		self.calc_cloudy()
 		self.apply_cuts()
+		self.lc = self.lc[self.lc.flag&sum(self.cuts)==0]
 		if len(self.lc.loc[(self.lc.target_x<0) | (self.lc.target_y<0)])>0:
 			self.lc = self.lc.loc[(self.lc.target_x>=0) & (self.lc.target_y>=0)]
 		self.match_ref_im()
@@ -363,6 +365,7 @@ class ztf_object:
 		#Add flags and transform to dr2-like df, add cloudy, cuts, & refmags, Remove points where the SN is not on the chip
 		self.calc_cloudy()
 		self.apply_cuts()
+		self.lc = self.lc[self.lc.flag&sum(self.cuts)==0]
 		if len(self.lc.loc[(self.lc.target_x<0) | (self.lc.target_y<0)])>0:
 			self.lc = self.lc.loc[(self.lc.target_x>=0) & (self.lc.target_y>=0)]
 		#Should have everything that is actually needed already in the correct column names, if not check & change here
@@ -455,7 +458,6 @@ class ztf_object:
 	def correct_baseline(self):
 		self.text += '-----\ncorrect baseline \n\n'
 		#Begin with dropping non_used data (dropped pionts are in lc_orig)
-		self.lc = self.lc[self.lc.flag&sum(self.cuts)==0].copy()
 		for band in ['g', 'r', 'i']:
 			for field in self.lc[self.lc.obs_filter.str.contains(band)].fieldid.unique():
 				for rcid in self.lc[((self.lc.obs_filter.str.contains(band)) &
@@ -546,8 +548,8 @@ class ztf_object:
 	def calc_cloudy(self):
 		#Cloudy has 4 conditions, pass 1 & the point should be removed
 		#(Conditions from Adam Miller / Mat Smith)
-	    #They get values 1,2,4,8 to keep track of which condition removed each point,
-	    #& 16 for no_data (field=-99)
+		#They get values 1,2,4,8 to keep track of which condition removed each point,
+		#& 16 for no_data (field=-99)
 		# Define cloudy; default to the IPAC values
 		airmass_slope = [0.20, 0.15, 0.07]
 		zprms_cut     = [0.06, 0.05, 0.06]
@@ -613,7 +615,6 @@ class ztf_object:
 		self.lc.loc[self.lc.cloudy>0, 'flag'] += 8
 		self.lc.loc[self.lc['seeing']>seeing_max, 'flag'] += 64
 		#Apply the cuts
-		self.lc = self.lc[self.lc.flag == 0]
 		return
 
 	def renormalise_fpbot_lc(self, new_ZP=30.):
