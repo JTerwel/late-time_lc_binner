@@ -1,20 +1,22 @@
 '''
-A program to stack and display late-time observations from the ZTF SN Ia dataset
+A program to stack and display late-time observations of transients, observed with ZTF
 
 Author: Jacco Terwel
-Date: 23-08-23
+Date: 26-01-24
 
-This will be the final version -- A cleaned up version of _idr with the sims part integrated if possible
-Version is cleaned, can now choose between using idr files, simulations or raw fpbot files as input
-Can now choose to save lc_orig, lc_cor, bins (not needed for simulations for instance, takes up a lot of space)
-simulations are transformed into fpbot format
-simulations & fpbot are transformed into a _idr-like format (cloudy cuts etc)
-Added that part of the code, has been tested but not uploaded yet
-(small differences between idr & fpbot style to be checked a bit further, but that doesn't seem to have too much of an effect)
-Each input type has its own mode & load_source method
-should be easily adaptable for new cases by providing a new mode an load_source method
-(e.g. wanting to specify baseline region)
-can use the same extra_args at the end of the args list as in simulations if needed
+Added:
+	- Updated comments
+	- mkdir now also creates missing parent directories
+	- It is now possible to specify the maximum amount of cpus to use for multiprocessing
+	- Added a new mode: pre-ZTF
+		* The initial transient is assumed to have faded beyond the detection limit before the lc starts
+		* Choose which observations are used for the baseline correction
+		* Run different baseline regions consecutively
+		* Choose first/last N days/points or specify an mjd range
+		* Choose a single or multiple regions
+		* All points not in the baseline region(s) are used for binning
+		* No tail fits necessary (disabled in this mode), meaning any type of transient can be used
+	- Added some extra functions and extra/rewritten lines to existing functions to make the new mode work
 '''
 
 #Imports & global constants
@@ -57,18 +59,16 @@ def main():
 	#Set location where the results will be saved
 	print('\nStarting the program\nCollecting objects')
 	saveloc = Path(sys.argv[2])
-	saveloc.mkdir(exist_ok=True)
+	saveloc.mkdir(exist_ok=True, parents=True)
 
 	#Set mode (type of input) & Set the location of the object files and list them if needed
-	modes = ['ZTFDR2', 'simulations', 'fpbot']
+	modes = ['ZTFDR2', 'simulations', 'fpbot', 'real_time', 'pre-ZTF']
 	mode = config.loc['mode'][1]
-	if mode == modes[0]: #Files are in the DR2 format
+	if ((mode == modes[0]) | (mode == modes[2]) | (mode == modes[3]) | (mode == modes[4])): #Files are csv files in a folder
 		datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
 	elif mode == modes[1]: #No files, instead a list of simsurvey lcs that need conversion
 		import simsurvey
 		datafiles = simsurvey.LightcurveCollection(load=Path(sys.argv[1])/'lcs.pkl')
-	elif mode == modes[2]: #raw fpbot format that need conversion
-		datafiles = list(Path(sys.argv[1]).rglob('*.csv'))
 	else:
 		print(f'Error: mode {mode} not recognised, please use one from the following list:')
 		print(modes)
@@ -96,6 +96,7 @@ def main():
 	min_sep = ast.literal_eval(config.loc['min_sep'][1])
 	min_successes = ast.literal_eval(config.loc['min_successes'][1])
 	save_lc_and_bins = ast.literal_eval(config.loc['save_lc_and_bins'][1])
+	note_missing_host = ast.literal_eval(config.loc['note_missing_host'][1])
 
 	if ((mode == modes[0]) | (mode == modes[2])):
 		args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, mode, binsizes, phases,
@@ -108,35 +109,57 @@ def main():
 				method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
 				save_lc_and_bins, [datafiles[_], fields]] for _ in range(len(datafiles.lcs))]
 		nr_files = len(datafiles.lcs)
+	elif mode == modes[3]:
+		args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, mode, binsizes, phases,
+				 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
+				 save_lc_and_bins] for f in datafiles]
+		nr_files = len(datafiles)
+	elif mode == modes[4]:
+		#Make a list of strings containing the baselines, args will be made later
+		baselines = pd.read_csv(config.loc['baselines_loc'][1], header=0).date_range.values
+		nr_files = len(datafiles)
 	else:
 		print(f'Error, {mode} not recognised when building the args list, stopping the program')
 		return
 
 	#Save all settings
-	data_settings = {'cuts': cuts}
-	data_settings.update({'late_time':late_time, 'binsizes':binsizes, 'phases':phases,
-						  'method':method, 'min_sep':min_sep, 'min_successes':min_successes})
-	settings = pd.Series(data_settings)
-	settings.to_csv(saveloc / 'settings.csv')
+	if mode != modes[3]:
+		data_settings = {'cuts': cuts}
+		data_settings.update({'late_time':late_time, 'binsizes':binsizes, 'phases':phases,
+							  'method':method, 'min_sep':min_sep, 'min_successes':min_successes})
+		settings = pd.Series(data_settings)
+		settings.to_csv(saveloc / 'settings.csv')
 
 	print('Initialization complete, starting checking each object')
 	#use each cpu core separately & keep track of progress
-	pool = mp.Pool(mp.cpu_count())
+	max_cpu = ast.literal_eval(config.loc['max_cpu'][1])
+	pool = mp.Pool(min(int(max_cpu), mp.cpu_count()) if max_cpu is not None else mp.cpu_count())
 
-	list(tqdm(pool.imap_unordered(check_object, args), total=nr_files))
+	if mode == modes[4]:
+		for _ in baselines:
+			print(f'Running the binning program while using the following baseline region: {_}')
+			args = [[f, refmags, saveloc, late_time, zp_rcid, cuts, base_gap, mode, binsizes, phases,
+					 method, earliest_tail_fit_start, verdict_sigma, tail_fit_chi2dof_tresh,
+					 save_lc_and_bins, _] for f in datafiles]
+			list(tqdm(pool.imap_unordered(check_object, args), total=nr_files))
+	else:
+		list(tqdm(pool.imap_unordered(check_object, args), total=nr_files))
 	pool.close()
 	pool.join()
 	print('All objects binned & evaluated, putting objects through the final filter')
-	#Load the host data
+	if mode == modes[4]:
+		all_obs = [f for f in saveloc.rglob('*/*') if f.is_dir()]
+	else:
+		all_obs = [f for f in saveloc.rglob('*') if f.is_dir()]
+	#Set host data locations
 	loc_list = config.loc['loc_list_loc'][1]
 	dat_list = config.loc['dat_list_loc'][1]
-	if mode == 'simulations':
-		host_dat = [None for f in saveloc.rglob('*') if f.is_dir()]
+	if ((mode == modes[1]) | (mode == modes[4])):
+		host_dat = [None]*len(all_obs)
 	else:
 		host_dat = get_host_data([f.name for f in saveloc.rglob('*') if f.is_dir()], loc_list, dat_list)
 	#Give the final verdicts
-	all_obs = [f for f in saveloc.rglob('*') if f.is_dir()]
-	final_verdicts = give_final_verdicts(all_obs, host_dat, min_sep, min_successes)
+	final_verdicts = give_final_verdicts(mode, all_obs, host_dat, min_sep, min_successes, note_missing_host)
 	final_verdicts.to_csv(saveloc / 'final_verdicts.csv', index=False)
 	print('Program finished\n')
 	return
@@ -167,6 +190,7 @@ class ztf_object:
 	- tail_fit_chi2dof_tresh: chi2dof treshold for a successful tail fit
 	- peak_mjd (float): found mjd of the SN peak
 	- peak_mag (float): found mag of the SN peak
+	- final_mjd (dict): final observation mjd for each band
 	- text (string): Notes on this object, will be saved in a .txt file
 	- binlist (list): list of binning attempts, one for each filter, binsize, phase cobination
 	- verdictlist (list): list of verdicts for each binning attempt in binlist
@@ -186,7 +210,9 @@ class ztf_object:
 			self.name = f'lc_{args[0]}'
 		elif self.mode == 'fpbot':
 			self.name = args[0].name.rsplit('_SNT',1)[0]
-		else:
+		elif ((self.mode == 'real_time') | (self.mode == 'pre-ZTF')):
+			self.name = Path(args[0]).stem
+		else: #It should not be possible to get here, but just in case
 			self.name = args[0]
 		self.loc = args[0]
 		self.refmags = args[1]
@@ -208,15 +234,21 @@ class ztf_object:
 		self.verdictlist = []
 		self.imp_df = pd.DataFrame(columns=['name', 'val'])
 		#Make the directory to save things in
-		self.saveloc.mkdir(exist_ok=True)
+		self.saveloc.mkdir(exist_ok=True, parents=True)
 		#Load the lc
 		if self.mode == 'ZTFDR2':
 			self.load_source_dr2()
 		elif self.mode == 'simulations':
 			self.extra_args = args[15]
 			self.load_source_sims()
-		elif self.mode == 'fpbot':
+		elif ((self.mode == 'fpbot') | (self.mode == 'real_time')):
 			self.load_source_fpbot()
+		elif self.mode == 'pre-ZTF':
+			self.baseline_request = args[15]
+			self.load_source_pre_ZTF()
+		#Note the final mjd for each band
+		if len(self.lc) != 0:
+			self.note_final_mjd()
 		return
 
 	def load_source_dr2(self):
@@ -337,19 +369,65 @@ class ztf_object:
 
 	def load_source_fpbot(self):
 		#Load the lc assuming a raw fpbot style dataframe
-		cols = ['obsmjd', 'filter', 'Fratio', 'Fratio.err', 'mag', 'mag_err', 'upper_limit', 'ampl',
-				'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzpunc', 'magzprms', 'airmass', 'nmatches',
-				'rcid', 'fieldid', 'infobits', 'filename', 'exptime', 'sigma', 'sigma.err', 'target_x', 'target_y']
-		try:
-			self.lc = pd.read_csv(self.loc, usecols = cols, comment='#')
-		except: #In case something goes wrong when reading in
-			self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
-			self.peak_mjd = 0
-			self.lc = pd.DataFrame(columns=cols)
-			return
+		if self.mode == 'real_time':
+			#The real-time version of fpbot stops before the plot command, which add the last 7 columns
+			#Therefore we'll need to make them here if they're needed
+			cols = ['obsmjd', 'filter', 'ampl',
+					'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzpunc', 'magzprms', 'airmass', 'nmatches',
+					'rcid', 'fieldid', 'infobits', 'filename', 'exptime', 'sigma', 'sigma.err', 'target_x',
+					'target_y', 'maglim']
+			try:
+				self.lc = pd.read_csv(self.loc, usecols = cols, comment='#')
+			except: #In case something goes wrong when reading in
+				self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
+				self.peak_mjd = 0
+				self.lc = pd.DataFrame(columns=cols)
+				return
+			#Need to make Fratio, Fratio.err, mag, mag_err, upper_limit, and need F0 and F0_err for that
+			F0 = 10 ** (self.lc.magzp / 2.5)
+			F0_err = F0 / 2.5 * np.log(10) * self.lc.magzpunc
+			self.lc["Fratio"] = self.lc.ampl / F0
+			self.lc["Fratio.err"] = np.sqrt((self.lc["ampl.err"]/F0) ** 2+(self.lc.ampl*F0_err/F0**2)**2)
+			mags = []
+			mags_unc = []
+			upper_limits = []
+			Fratios = np.asarray(self.lc["Fratio"].values)
+			Fratios_unc = np.asarray(self.lc["Fratio.err"].values)
+			maglims = np.asarray(self.lc["maglim"].values)
+			for i, Fratio in enumerate(Fratios):
+				Fratio_unc = Fratios_unc[i]
+				if Fratio > (Fratio_unc * 5): #Fixed snt to 5
+					upper_limit = np.nan
+					mag = -2.5 * np.log10(Fratio)
+					mag_unc = 2.5 / np.log(10) * Fratio_unc / Fratio
+				else:
+					upper_limit = maglims[i]
+					mag = 99
+					mag_unc = 99
+				upper_limits.append(upper_limit)
+				mags.append(mag)
+				mags_unc.append(mag_unc)
+			self.lc["upper_limit"] = upper_limits
+			self.lc["mag"] = mags
+			self.lc["mag_err"] = mags_unc
+		else: #Normal fpbot format coming from the Slackbot
+			cols = ['obsmjd', 'filter', 'Fratio', 'Fratio.err', 'mag', 'mag_err', 'upper_limit', 'ampl',
+					'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzpunc', 'magzprms', 'airmass', 'nmatches',
+					'rcid', 'fieldid', 'infobits', 'filename', 'exptime', 'sigma', 'sigma.err', 'target_x',
+					'target_y']
+			try:
+				self.lc = pd.read_csv(self.loc, usecols = cols, comment='#')
+			except: #In case something goes wrong when reading in
+				self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
+				self.peak_mjd = 0
+				self.lc = pd.DataFrame(columns=cols)
+				return
 		#Rename problematic columns
 		self.lc.rename(columns={'filter':'obs_filter', 'Fratio.err':'Fratio_err',
 						   		'ampl.err':'ampl_err', 'sigma.err':'sigma_err'}, inplace=True)
+		if len(self.lc) == 0: #lc turns out to be empty --> No use in trying to do any of the following steps
+			self.peak_mjd = 0
+			return
 		# Update the filter entries for consistency.
 		self.lc.loc[self.lc.obs_filter == 'ZTF g', 'obs_filter'] = 'ztfg'
 		self.lc.loc[self.lc.obs_filter == 'ZTF r', 'obs_filter'] = 'ztfr'
@@ -368,7 +446,7 @@ class ztf_object:
 		self.lc = self.lc[self.lc.flag&sum(self.cuts)==0]
 		if len(self.lc.loc[(self.lc.target_x<0) | (self.lc.target_y<0)])>0:
 			self.lc = self.lc.loc[(self.lc.target_x>=0) & (self.lc.target_y>=0)]
-		#Should have everything that is actually needed already in the correct column names, if not check & change here
+		#Match reference images
 		self.match_ref_im()
 		#Put everything to zp 30
 		self.renormalise_fpbot_lc()
@@ -407,6 +485,139 @@ class ztf_object:
 		if ((self.peak_mjd != tmp1) | (self.peak_mag != tmp2)):
 			self.text += f'NOTE: Peak has changed after baseline corrections by {self.peak_mjd-tmp1} days and {self.peak_mag-tmp2} mags\n'
 		self.check_refmjd()
+		return
+
+	def load_source_pre_ZTF(self):
+		#Check if the pre-baseline correction lc exists. If so load it, else make it
+		if (self.saveloc / 'lc_orig.csv').is_file():
+			try:
+				self.lc = pd.read_csv(self.saveloc / 'lc_orig.csv', header=0)
+				found_orig = True
+			except:
+				found_orig = False
+		else:
+			found_orig = False
+		if not found_orig:
+			#The fpbot stopped before the plot command, which add the last 7 columns
+			#Therefore we'll need to make them here if they're needed
+			cols = ['obsmjd', 'filter', 'ampl',
+					'ampl.err', 'chi2dof', 'seeing', 'magzp', 'magzpunc', 'magzprms', 'airmass', 'nmatches',
+					'rcid', 'fieldid', 'infobits', 'filename', 'exptime', 'sigma', 'sigma.err', 'target_x',
+					'target_y', 'maglim']
+			try:
+				self.lc = pd.read_csv(self.loc, usecols = cols, comment='#')
+			except: #In case something goes wrong when reading in
+				self.text += f'Could not read in lc for {self.name}\n'+ traceback.format_exc() + '\n'
+				self.peak_mjd = 0
+				self.lc = pd.DataFrame(columns=cols)
+				return
+			#Need to make Fratio, Fratio_err, mag, mag_err, upper_limit, and need F0 and F0_err for that
+			F0 = 10 ** (self.lc.magzp / 2.5)
+			F0_err = F0 / 2.5 * np.log(10) * self.lc.magzpunc
+			self.lc["Fratio"] = self.lc.ampl / F0
+			self.lc["Fratio_err"] = np.sqrt((self.lc["ampl.err"]/F0) ** 2+(self.lc.ampl*F0_err/F0**2)**2)
+			mags = []
+			mags_unc = []
+			upper_limits = []
+			Fratios = np.asarray(self.lc["Fratio"].values)
+			Fratios_unc = np.asarray(self.lc["Fratio_err"].values)
+			maglims = np.asarray(self.lc["maglim"].values)
+			for i, Fratio in enumerate(Fratios):
+				Fratio_unc = Fratios_unc[i]
+				if Fratio > (Fratio_unc * 5): #Fixed snt to 5
+					upper_limit = np.nan
+					mag = -2.5 * np.log10(Fratio)
+					mag_unc = 2.5 / np.log(10) * Fratio_unc / Fratio
+				else:
+					upper_limit = maglims[i]
+					mag = 99
+					mag_unc = 99
+				upper_limits.append(upper_limit)
+				mags.append(mag)
+				mags_unc.append(mag_unc)
+			self.lc["upper_limit"] = upper_limits
+			self.lc["mag"] = mags
+			self.lc["mag_err"] = mags_unc
+			#Rename problematic columns
+			self.lc.rename(columns={'filter':'obs_filter', 'ampl.err':'ampl_err', 'sigma.err':'sigma_err'},
+						   inplace=True)
+			if len(self.lc) == 0: #lc turns out to be empty --> No use in trying to do any of the following steps
+				self.peak_mjd = 0
+				return
+			# Update the filter entries for consistency.
+			self.lc.loc[self.lc.obs_filter == 'ZTF g', 'obs_filter'] = 'ztfg'
+			self.lc.loc[self.lc.obs_filter == 'ZTF r', 'obs_filter'] = 'ztfr'
+			self.lc.loc[self.lc.obs_filter == 'ZTF i', 'obs_filter'] = 'ztfi'
+			self.lc.loc[self.lc.obs_filter == 'ZTF_g', 'obs_filter'] = 'ztfg'
+			self.lc.loc[self.lc.obs_filter == 'ZTF_r', 'obs_filter'] = 'ztfr'
+			self.lc.loc[self.lc.obs_filter == 'ZTF_i', 'obs_filter'] = 'ztfi'
+			#Remove rows with rcid = NaN
+			self.lc = self.lc[~self.lc.rcid.isnull().values].reset_index(drop=True)
+			# Remove duplicate observations: (uses field, rcid, filter and mjd)
+			self.lc = self.lc.drop_duplicates(subset=['fieldid','obs_filter','rcid','obsmjd'], keep='last')
+			self.lc = self.lc.reset_index(drop=True)
+			#Add flags and transform to dr2-like df, add cloudy, cuts, & refmags, Remove points where the SN is not on the chip
+			self.calc_cloudy()
+			self.apply_cuts()
+			self.lc = self.lc[self.lc.flag&sum(self.cuts)==0]
+			if len(self.lc.loc[(self.lc.target_x<0) | (self.lc.target_y<0)])>0:
+				self.lc = self.lc.loc[(self.lc.target_x>=0) & (self.lc.target_y>=0)]
+			self.lc.reset_index(drop=True, inplace=True)
+			#Match reference images
+			self.match_ref_im()
+			#Put everything to zp 30
+			self.renormalise_fpbot_lc()
+			#Save this lc before bad points are removed if wanted
+			nr_points = [len(self.lc[self.lc.obs_filter.str.contains('g')]),
+						 len(self.lc[self.lc.obs_filter.str.contains('r')]),
+						 len(self.lc[self.lc.obs_filter.str.contains('i')])]
+			self.lc.to_csv(self.saveloc/'lc_orig.csv')
+			#Save the notes on making the lc up to applying the baseline correction & reset it
+			ftext = open(self.saveloc/'notes.txt', 'w')
+			ftext.write(self.text)
+			ftext.close()
+			self.text = f'Notes on {self.name}:\n\n'
+		#Set the range to be used for the baseline correction
+		self.select_baseline()
+		if len(self.baselines) == 0:
+			text += 'No proper baseline region found\nReturning an empty DataFrame'
+			self.lc = pd.DataFrame(columns=cols)
+			return
+		#From here on, everything will be saved in the baseline specific subfolder, so update saveloc and make directory
+		#folder naming convention = b<# baseline regions>_<1st baseline start mjd>_<1st baseline end mjd>
+		self.saveloc = self.saveloc / f'b{len(self.baselines)}_{self.baselines[0][0]:.0f}_{self.baselines[0][1]:.0f}'
+		self.saveloc.mkdir(exist_ok=True, parents=True)
+		self.correct_baseline()
+		self.lc.reset_index(drop=True, inplace=True)
+		#Drop the points that were used for the baseline correction as they can't be used in the binning
+		to_bin = [True]*len(self.lc)
+		for r in self.baselines:
+			for _ in self.lc.index:
+				if ((self.lc.loc[_, 'obsmjd'] >= r[0]) & (self.lc.loc[_, 'obsmjd'] <= r[1])):
+					to_bin[_] = False
+		self.lc = self.lc[to_bin]
+		self.lc.reset_index(drop=True, inplace=True)
+		#Save the baseline corrected lc if wanted
+		if self.save_lc_and_bins:
+			self.lc.to_csv(self.saveloc/'lc_cor.csv')
+		if self.lc.empty:
+			self.text += '-----\nNo good datapoints left, no binning can be performed\n'
+		#Set peak_mjd & late_time to dummy values to ensure the program works and bins all remaining points
+		self.peak_mjd = 1
+		self.late_time = 100
+		#Note when the references were made
+		if not self.lc.empty:
+			self.check_refmjd()
+		return
+
+	def note_final_mjd(self):
+		'''
+		Note down the final mjd in each band
+		'''
+		self.final_mjd = {}
+		for band in ['g', 'r', 'i']:
+			if len(self.lc[self.lc.obs_filter.str.contains(band)]) > 0:
+				self.final_mjd[band] = self.lc[self.lc.obs_filter.str.contains(band)].obsmjd.max()
 		return
 
 	def undo_correction(self):
@@ -455,18 +666,68 @@ class ztf_object:
 					(self.refmags.fid==fid))].maglimit.mean()
 		return
 
+	def select_baseline(self):
+		'''
+		Converts a text describing the baseline regions into a list of start & end mjd
+		'''
+		self.baselines = []
+		#If there are multiple regions to be used they are separated by &
+		for region in self.baseline_request.split (' & '):
+			words = region.split(' ')
+			if ((words[0].lower() == 'first') & (words[2].lower() == 'days')):
+				base_mjd_start = self.lc.obsmjd.min()
+				base_mjd_end = base_mjd_start + float(words[1])
+			elif ((words[0].lower() == 'first') & (words[2].lower() == 'points')):
+				base_mjd_start = self.lc.obsmjd.min()
+				base_mjd_end = sort(self.lc.obsmjd.values)[int(words[1]) - 1]
+			elif ((words[0].lower() == 'last') & (words[2].lower() == 'days')):
+				base_mjd_end = self.lc.obsmjd.max()
+				base_mjd_start = base_mjd_end - float(words[1])
+			elif ((words[0].lower() == 'last') & (words[2].lower() == 'points')):
+				base_mjd_start = sort(self.lc.obsmjd.values)[-int(words[1])]
+				base_mjd_end = self.lc.obsmjd.max()
+			elif words[0].lower() == 'from':
+				base_mjd_start = float(words[1])
+				if len(words) > 2:
+					if words[2].lower() == 'to':
+						base_mjd_end = float(words[3])
+					else:
+						base_mjd_end = self.lc.obsmjd.max()
+				else:
+					base_mjd_end = self.lc.obsmjd.max()
+			elif words[0].lower() == 'to':
+				base_mjd_start = self.lc.obsmjd.min()
+				base_mjd_end = float(words[1])
+			else:
+				self.text += f'Baseline{region} not recognised, skipping\n'
+				continue
+			self.baselines.append([base_mjd_start, base_mjd_end])
+		return
+
+
 	def correct_baseline(self):
 		self.text += '-----\ncorrect baseline \n\n'
-		#Begin with dropping non_used data (dropped pionts are in lc_orig)
 		for band in ['g', 'r', 'i']:
 			for field in self.lc[self.lc.obs_filter.str.contains(band)].fieldid.unique():
 				for rcid in self.lc[((self.lc.obs_filter.str.contains(band)) &
 									 (self.lc.fieldid == field))].rcid.unique():
-					#Assuming peak_mjd = correct, only use the points before base_gap days before the peak
-					this_combo = self.lc[((self.lc.obs_filter.str.contains(band)) &
-										  (self.lc.fieldid == field) &
-										  (self.lc.rcid == rcid) &
-										  (self.lc.obsmjd < self.peak_mjd-self.base_gap))]
+					if self.mode == 'pre-ZTF': #Use requested region(s) for the baseline correction
+						self.lc.reset_index(drop=True, inplace=True)
+						wanted = [False]*len(self.lc)
+						for r in self.baselines: #Loop over all baseline regions
+							for _ in self.lc.index:
+								if ((band in self.lc.loc[_, 'obs_filter']) &
+									(self.lc.loc[_, 'fieldid'] == field) &
+									(self.lc.loc[_, 'rcid'] == rcid) & (self.lc.loc[_, 'obsmjd'] >= r[0]) &
+									(self.lc.loc[_, 'obsmjd'] <= r[1])):
+									wanted[_] = True
+						this_combo = self.lc[wanted]
+						self.text += f'{len(this_combo)} points are in the baseline region for band {band}, field {field}, rcid{rcid}\n'
+					else: #Assuming peak_mjd = correct, only use the points before base_gap days before the peak
+						this_combo = self.lc[((self.lc.obs_filter.str.contains(band)) &
+											  (self.lc.fieldid == field) &
+											  (self.lc.rcid == rcid) &
+											  (self.lc.obsmjd < self.peak_mjd-self.base_gap))]
 					#Only use points that will be non-detections after the correction
 					nondets = this_combo[(this_combo.Fratio-this_combo.Fratio.mean())/
 										 this_combo.Fratio_err <= 5]
@@ -476,7 +737,10 @@ class ztf_object:
 						#Weighted baseline uncertainties using the correct formula & the one with my typo from last iteration (for comparison)
 						basel_err = np.sqrt(sum(weights* (nondets.Fratio - basel)**2) /
 											(sum(weights)*(len(nondets)-1)))
-						self.text += f'{band} {field} {rcid} <{self.peak_mjd-self.base_gap}: basel = {basel:.3f}, err = {basel_err:.3f}, mean = {nondets.Fratio.mean():.3f}\n'
+						if self.mode == 'pre-ZTF':
+							self.text += f'{band} {field} {rcid} {self.baselines}: basel = {basel:.3f}, err = {basel_err:.3f}, mean = {nondets.Fratio.mean():.3f}\n'
+						else:
+							self.text += f'{band} {field} {rcid} <{self.peak_mjd-self.base_gap}: basel = {basel:.3f}, err = {basel_err:.3f}, mean = {nondets.Fratio.mean():.3f}\n'
 						#Correct Fratio
 						self.lc.loc[self.lc[((self.lc.obs_filter.str.contains(band)) &
 									(self.lc.fieldid == field) & (self.lc.rcid == rcid))].index,
@@ -687,11 +951,30 @@ class ztf_object:
 					ref = self.refmags[((self.refmags.fid==band[1])&
 										(self.refmags.field==field)&
 										(self.refmags.rcid==rcid))]
-					if len(ref)==1:
-						if ((ref.startmjd.values[0]<self.peak_mjd)&(ref.endmjd.values[0]>self.peak_mjd)):
-							self.text +=f'WARNING: band {band[0]}, field {field}, rcid {rcid} might have the SN in the ref image\n'
-					elif len(ref)>1:
-						self.text +=f'WARNING: multiple instances of band {band[0]}, field {field}, rcid {rcid}, cannot determine if the SN might be inthe ref image\n'
+					if self.mode == 'pre-ZTF':
+						#Note the periods in which the references were made & if that is (partially) in or outside the used baseline region
+						for i in range(len(ref)):
+							self.text += f'For band {band[0]}, field {field}, rcid {rcid}, reference {i+1} was made between {ref.startmjd.values[i]:.2f} and {ref.endmjd.values[i]:.2f}\n'
+							in_baseline = 'outside'
+							for _ in self.baselines:
+								if ((ref.startmjd.values[i] >= _[0]) & (ref.startmjd.values[i] <= _[1])):
+									if ((ref.endmjd.values[i] >= _[0]) & (ref.endmjd.values[i] <= _[1])):
+										in_baseline = 'completely in'
+										break
+									else:
+										in_baseline = 'partially in '
+										break
+								elif ((ref.endmjd.values[i] >= _[0]) & (ref.endmjd.values[i] <= _[1])):
+									in_baseline = 'partially'
+									break
+							self.text += f'This is {in_baseline} the chosen baseline region\n'
+					else:
+						if len(ref)==1:
+							if ((ref.startmjd.values[0]<self.peak_mjd)&(ref.endmjd.values[0]>self.peak_mjd)):
+								self.text +=f'WARNING: band {band[0]}, field {field}, rcid {rcid} might have the SN in the ref image\n'
+						elif len(ref)>1:
+							self.text +=f'WARNING: multiple instances of band {band[0]}, field {field}, rcid {rcid}, cannot determine if the SN might be inthe ref image\n'
+		return
 
 	def bin_all(self):
 		#Bin the late-time data & store it in bins for all band, binsize & filter combinations
@@ -719,12 +1002,16 @@ class ztf_object:
 			counter += 1
 			#Select the points that can be used for the tail fit if needed
 			#These should lie between the earliest allowed start & late-time observations
-			points = self.lc[((self.lc.obs_filter.str.contains(attempt.obs_filter[0][-1]))&
-							  (self.lc.obsmjd>self.peak_mjd+self.earliest_tail_fit_start)&
-							  (self.lc.obsmjd<self.peak_mjd+self.late_time))]
+			if self.mode == 'pre-ZTF':
+				points = None
+			else:
+				points = self.lc[((self.lc.obs_filter.str.contains(attempt.obs_filter[0][-1]))&
+								  (self.lc.obsmjd>self.peak_mjd+self.earliest_tail_fit_start)&
+								  (self.lc.obsmjd<self.peak_mjd+self.late_time))]
 			#Give the verdict and append it to the list
 			verdict, err = give_verdict(attempt, points, self.peak_mjd, self.verdict_sigma,
-										self.tail_fit_chi2dof_tresh, self.saveloc)
+										self.tail_fit_chi2dof_tresh, self.saveloc, self.save_lc_and_bins,
+										self.final_mjd[attempt.obs_filter[0][-1]])
 			self.verdictlist.append(verdict)
 			#Log the fitting error if it occured
 			if err is not None:
@@ -740,7 +1027,9 @@ def check_object(args):
 	#Load the light curve
 	obj_data = ztf_object(args)
 	#Check if there is data to do the binning, end if not
-	if len(obj_data.lc[obj_data.lc.obsmjd>=obj_data.peak_mjd+obj_data.late_time]) > 0:
+	if obj_data.lc.empty:
+		obj_data.text += 'It seems that the dataframe has come up empty, no binning could be performed\n'
+	elif len(obj_data.lc[obj_data.lc.obsmjd>=obj_data.peak_mjd+obj_data.late_time]) > 0:
 		#Do the binning for each combination of filter, binsize & phase
 		obj_data.bin_all()
 		#Save the bins
@@ -754,30 +1043,32 @@ def check_object(args):
 		all_verdicts.to_csv(obj_data.saveloc / 'verdicts.csv', index=False)
 	else:
 		obj_data.text += 'Unfortunately, there are no useful late-time observations available. Either they do not exist, or they have been cut for some reason\nBinning could not be performed\n'
-	#Save the notes & imp_df
-	obj_data.imp_df.to_csv(obj_data.saveloc / 'derived_values.csv', index=False)
-	ftext = open(obj_data.saveloc/'notes.txt', 'w')
-	ftext.write(obj_data.text)
-	ftext.close()
+	#Save the notes & imp_df (Disabled in real_time mode)
+	if obj_data.mode != 'real_time':
+		obj_data.imp_df.to_csv(obj_data.saveloc / 'derived_values.csv', index=False)
+		ftext = open(obj_data.saveloc/'notes.txt', 'w')
+		ftext.write(obj_data.text)
+		ftext.close()
 	return
 
-def give_final_verdicts(obj_list, host_dat, min_sep, min_successes):
+def give_final_verdicts(mode, obj_list, host_dat, min_sep, min_successes, note_missing_host=False):
 	#Give a final verdict for each object & save them
 	final_verdicts = pd.DataFrame()
 	for _ in obj_list:
-		if None in host_dat: #For the simulations
+		if None in host_dat: #For the simulations & pre-ZTF
 			final_verdicts = final_verdicts.append(final_verdict(_, [None],
-																 min_sep, min_successes),
+																 min_sep, min_successes, mode),
 												   ignore_index=True)
 		else:
 			try:
 				final_verdicts = final_verdicts.append(final_verdict(_, host_dat[host_dat.ztfname==_.name],
-																	 min_sep, min_successes),
+																	 min_sep, min_successes, mode,
+																	 note_missing_host=note_missing_host),
 													   ignore_index=True)
 			except:
 				print('Error: host data not recognised, assuming none to create final verdicts')
 				final_verdicts = final_verdicts.append(final_verdict(_, [None],
-																	 min_sep, min_successes),
+																	 min_sep, min_successes, mode),
 													   ignore_index=True)
 	return final_verdicts
 
@@ -880,11 +1171,12 @@ def bin_late_time(data, band, binsize, phase, method, late_time):
 #| Filtering functions |
 #*---------------------*
 
-def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
+def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc, save_lc_and_bins, final_obs_mjd):
 	err = None
 	fit = None
 	max_val = None
 	verdict = 0
+	last_bin_det = False
 	#Are there any bins?
 	if len(bins) > 0:
 		#Are there any bins that are detections?
@@ -894,9 +1186,12 @@ def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
 			verdict += 2
 			#Trusted detections require Fratio >0, significance >= sigma
 			trusted_bins = bins[((bins.Fratio>0) & (bins.significance>=sigma))]
-			#Do the bins with detections contain enough points?
+			#Do the bins with detections contain enough points? ##I think I removed this condition. If so the comment should be removed as well
 			if not trusted_bins.empty:
 				verdict += 4
+				#Is the last bin a detection?
+				if ((bins.Fratio.iloc[-1] > 0) & (bins.significance.iloc[-1] >= sigma)):
+					last_bin_det = True
 				#Is it a single bin or are there multiple ones?
 				if len(trusted_bins) == 1:
 					verdict += 8
@@ -906,33 +1201,37 @@ def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
 					#Is the first bin a detection? (Only interested if there are ajacent dets)
 					if trusted_bins.index[0] == bins.index[0]:
 						verdict += 32
-						#Try to fit a nuclear decay tail model to the data
-						try:
-							fit, max_val = test_tail_model(bins, points, peak_mjd)
-							#Was the fit successful enough to estimate errorbars?
-							if not fit.errorbars:
-								verdict += 128
-							else:
-								verdict += 256
-								#Is the final fit good enough (below the reduced chi square treshold)?
-								if fit.redchi > chi2dof_tresh:
-									verdict += 512
+						if points is not None:
+							#Try to fit a nuclear decay tail model to the data
+							try:
+								fit, max_val = test_tail_model(bins, points, peak_mjd)
+								#Was the fit successful enough to estimate errorbars?
+								if not fit.errorbars:
+									verdict += 128
 								else:
-									verdict += 1024
-								#Is the half-life within the expected range, not larger?
-								if fit.params['tau'].value-sigma*fit.params['tau'].stderr > fit.init_values['tau']:
-									verdict += 2048
-								else:
-									verdict += 4096
-						except: #If the fit ends up with an error, make note of it and skip the fit evaluation part
-							err = traceback.format_exc()
-							verdict += 64
+									verdict += 256
+									#Is the final fit good enough (below the reduced chi square treshold)?
+									if fit.redchi > chi2dof_tresh:
+										verdict += 512
+									else:
+										verdict += 1024
+									#Is the half-life within the expected range, not larger?
+									if fit.params['tau'].value-sigma*fit.params['tau'].stderr > fit.init_values['tau']:
+										verdict += 2048
+									else:
+										verdict += 4096
+							except: #If the fit ends up with an error, make note of it and skip the fit evaluation part
+								err = traceback.format_exc()
+								verdict += 64
+	# Check if the last bin was a detection
+	final_bin_det = True if bins.significance.values[-1] >= sigma else False
 	#Put the results in a df, including the fit result if it was made
 	if fit != None:
 		#Save the model
 		x = np.linspace(fit.params['t0'].value, bins.mjd_bin.max()+100, 3000)
 		fit_res = pd.DataFrame({'x':x, 'y':fit.eval(x=x)*max_val, 'dy':fit.eval_uncertainty(x=x)*max_val})
-		fit_res.to_csv(saveloc/f'tail_mod_f{bins.obs_filter[0][-1]}_b{bins.binsize[0]}_p{bins.phase[0]}.csv')
+		if save_lc_and_bins:
+			fit_res.to_csv(saveloc/f'tail_mod_f{bins.obs_filter[0][-1]}_b{bins.binsize[0]}_p{bins.phase[0]}.csv')
 		if fit.errorbars:
 			result = pd.DataFrame({'band':[bins.obs_filter[0]], 'binsize':[bins.binsize[0]],
 								   'phase':[bins.phase[0]], 'a_init':[fit.params['a'].init_value*max_val],
@@ -943,7 +1242,8 @@ def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
 								   'sigma_t_half':[fit.params['tau'].stderr],
 								   't0':[fit.params['t0'].value], 'chi2':[fit.chisqr],
 								   'chi2dof':[fit.redchi], 'AIC':[fit.aic], 'BIC':[fit.bic],
-								   'verdict':[verdict]})
+								   'verdict':[verdict], 'final_bin_det':[final_bin_det],
+								   'final_obs_mjd':[final_obs_mjd]})
 		else:
 			result = pd.DataFrame({'band':[bins.obs_filter[0]], 'binsize':[bins.binsize[0]],
 								   'phase':[bins.phase[0]], 'a_init':[fit.params['a'].init_value*max_val],
@@ -952,16 +1252,18 @@ def give_verdict(bins, points, peak_mjd, sigma, chi2dof_tresh, saveloc):
 								   't_half':[fit.params['tau'].value], 'sigma_t_half':[' '],
 								   't0':[fit.params['t0'].value], 'chi2':[fit.chisqr],
 								   'chi2dof':[fit.redchi], 'AIC':[fit.aic], 'BIC':[fit.bic],
-								   'verdict':[verdict]})
+								   'verdict':[verdict], 'final_bin_det':[final_bin_det],
+								   'final_obs_mjd':[final_obs_mjd]})
 	else:
 		result = pd.DataFrame({'band':[bins.obs_filter[0]], 'binsize':[bins.binsize[0]],
 							   'phase':[bins.phase[0]], 'a_init':[' '], 'a':[' '], 'sigma_a':[' '],
 							   't_half_init':[' '], 't_half':[' '], 'sigma_t_half':[' '],
 							   't0':[' '], 'chi2':[' '], 'chi2dof':[' '], 'AIC':[' '],
-							   'BIC':[' '], 'verdict':[verdict]})
+							   'BIC':[' '], 'verdict':[verdict], 'final_bin_det':[final_bin_det],
+							   'final_obs_mjd':[final_obs_mjd]})
 	return result, err
 
-def final_verdict(obj_loc, host_dat, min_sep, min_successes):
+def final_verdict(obj_loc, host_dat, min_sep, min_successes, mode, note_missing_host=False):
 	#Give the final verdict of the object at the given location
 	dets = ' '
 	lone = ' '
@@ -976,6 +1278,12 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 	nr_g = 0
 	nr_r = 0
 	nr_i = 0
+	final_bin_det_g = 0
+	final_bin_det_r = 0
+	final_bin_det_i = 0
+	last_obs_mjd_g = 0
+	last_obs_mjd_r = 0
+	last_obs_mjd_i = 0
 	if not (obj_loc / 'verdicts.csv').is_file():
 		#No verdicts given (Probably no bins made)
 		bins = False
@@ -1015,7 +1323,8 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 									succes_attempts = bel_verdicts[((bel_verdicts.verdict&64!=0) | (bel_verdicts.verdict==22))]
 								elif len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 									too_nuc = False
-									print(obj_loc.name, 'has no host data')
+									if note_missing_host:
+										print(obj_loc.name, 'has no host data')
 									succes_attempts = bel_verdicts[((bel_verdicts.verdict&64!=0) | (bel_verdicts.verdict==22))]
 								else:
 									if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
@@ -1034,7 +1343,8 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 																 ignore_index=True)
 								elif len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 									too_nuc = False
-									print(obj_loc.name, 'has no host data')
+									if note_missing_host:
+										print(obj_loc.name, 'has no host data')
 									succes_attempts = pd.concat([bel_verdicts[bel_verdicts.verdict==22],
 																 with_fits[((with_fits.verdict&1024==0)|
 																			(with_fits.verdict&4096==0))]],
@@ -1056,7 +1366,8 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 
 						elif len(host_dat) == 0: #If there is no host_dat, assume its far away from the host
 							too_nuc = False
-							print(obj_loc.name, 'has no host data')
+							if note_missing_host:
+								print(obj_loc.name, 'has no host data')
 							succes_attempts = bel_verdicts[bel_verdicts.verdict==22]
 						else:
 							if ((host_dat.separation.values[0]<min_sep) & (host_dat.separation.values[0]>-99)): #Is it too close to the host nucleus?
@@ -1075,10 +1386,31 @@ def final_verdict(obj_loc, host_dat, min_sep, min_successes):
 				suc_r = True
 			if nr_i >= min_successes:
 				suc_i = True
-	df = pd.DataFrame({'name':obj_loc.name, 'bins':bins, 'detections':dets, 'lone_bins':lone,
-					   'adjacent':adjacent, 'possible_tail':pos_tail, 'fit_always_fails':fit_failed,
-					   'normal_tail':normal, 'too_nuclear':too_nuc, 'suc_g':suc_g, 'suc_r':suc_r,
-					   'suc_i':suc_i, 'nr_suc_g':nr_g, 'nr_suc_r':nr_r, 'nr_suc_i':nr_i}, index=[0])
+		if len(attempts[attempts.band=='ZTF_g']) > 0:
+			final_bin_det_g = len(attempts[((attempts.band=='ZTF_g') & (attempts.final_bin_det==True))])
+			last_obs_mjd_g = attempts[attempts.band=='ZTF_g'].final_obs_mjd.values[0]
+		if len(attempts[attempts.band=='ZTF_r']) > 0:
+			final_bin_det_r = len(attempts[((attempts.band=='ZTF_r') & (attempts.final_bin_det==True))])
+			last_obs_mjd_r = attempts[attempts.band=='ZTF_r'].final_obs_mjd.values[0]
+		if len(attempts[attempts.band=='ZTF_i']) > 0:
+			final_bin_det_i = len(attempts[((attempts.band=='ZTF_i') & (attempts.final_bin_det==True))])
+			last_obs_mjd_i = attempts[attempts.band=='ZTF_i'].final_obs_mjd.values[0]
+	if mode != 'pre-ZTF':
+		df = pd.DataFrame({'name':obj_loc.name, 'bins':bins, 'detections':dets, 'lone_bins':lone,
+						   'adjacent':adjacent, 'possible_tail':pos_tail, 'fit_always_fails':fit_failed,
+						   'normal_tail':normal, 'too_nuclear':too_nuc, 'suc_g':suc_g, 'suc_r':suc_r,
+						   'suc_i':suc_i, 'nr_suc_g':nr_g, 'nr_suc_r':nr_r, 'nr_suc_i':nr_i,
+						   'final_bin_det_g':final_bin_det_g, 'last_obs_mjd_g':last_obs_mjd_g,
+						   'final_bin_det_r':final_bin_det_r, 'last_obs_mjd_r':last_obs_mjd_r,
+						   'final_bin_det_i':final_bin_det_i, 'last_obs_mjd_i':last_obs_mjd_i}, index=[0])
+	else:
+		df = pd.DataFrame({'name':obj_loc.parent.name, 'baseline_region':obj_loc.name, 'bins':bins,
+						   'detections':dets, 'lone_bins':lone, 'adjacent':adjacent,
+						   'too_nuclear':too_nuc, 'suc_g':suc_g, 'suc_r':suc_r, 'suc_i':suc_i,
+						   'nr_suc_g':nr_g, 'nr_suc_r':nr_r, 'nr_suc_i':nr_i,
+						   'final_bin_det_g':final_bin_det_g, 'last_obs_mjd_g':last_obs_mjd_g,
+						   'final_bin_det_r':final_bin_det_r, 'last_obs_mjd_r':last_obs_mjd_r,
+						   'final_bin_det_i':final_bin_det_i, 'last_obs_mjd_i':last_obs_mjd_i}, index=[0])
 	return df
 
 #*------------------------*
@@ -1157,7 +1489,7 @@ def dflux2dmag(flux, flux_err):
 #*----------------------------------------------*
 
 def make_fpbot_df(lc, fields):
-	#Save the lightcurve in an FPbot-style csv file
+	#Format the lightcurve in an FPbot-style csv file
 	df = pd.DataFrame()
 	#Calculate derived values
 	observatory = EarthLocation(lat=33.35627096604836*u.deg, lon=-116.86481294596469*u.deg, height=1700*u.m)
@@ -1168,7 +1500,7 @@ def make_fpbot_df(lc, fields):
 						   [fields[fields.ID==i].Dec.values[0] for i in lc['field']],
 						   t, observatory)
 	decday = [f'{i.isot[0:4]}{i.isot[5:7]}{i.isot[8:10]}{str(float(i.isot[11:13])/24+float(i.isot[14:16])/(24*60)+(float(i.isot[17:]))/(24*3600))[2:8]}' for i in t]
-	#Put all values in the DataFrame & save it
+	#Put all values in the DataFrame
 	df['obsmjd'] = lc['time']
 	df['obs_filter'] = lc['band']
 	df['ampl'] = lc['flux']
