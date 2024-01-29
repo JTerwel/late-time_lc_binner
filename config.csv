@@ -1,18 +1,21 @@
-mode			ZTFDR2										#Input type (currently works with 'ZTFDR2', 'simulations' and 'fpbot')
-refmags_loc		/home/jaccoterwel/Documents/Late-time_obs_binning/ref_im_data.csv		#Location of the reference file magnitudes
-zp_rcid_loc		/home/jaccoterwel/Documents/Late-time_obs_binning/zp_thresholds_quadID.txt	#Location of the file with the zeropoints for each rcid
-loc_list_loc		/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_locs.csv		#Location of the file with the host galaxy locations
-dat_list_loc		/home/jaccoterwel/Documents/Late-time_obs_binning/SN_host_data.csv		#Lcoation of the file with the rest of the host galaxy data
-fields_list_loc		/home/jaccoterwel/Documents/simsurvey/ZTF_Fields.txt				#Location of the file with the field pointings
-late_time		100										#Nr. of days after found peak to start binning at
-cuts			[1,2,4,8,64]									#If any of these flags are raised, remove data point (hardcoded for fpbot & simulations)
-base_gap		40										#Gap between end of baseline and found peak mjd in days
-binsizes		[100,75,50,25]									#Size in days of used bins
-phases			[0.0,0.25,0.5,0.75]								#Offsets of bins used for each binsize in fraction of size
-method			4										#Method of calculating next bin position
-earliest_tail_fit_start	60										#Earliest time in days after peak mjd to use unbinned data in the tail fits
-verdict_sigma		5										#sigma = flux/flux_err treshold for bin to be considered a detection
-tail_fit_chi2dof_tresh	5										#Treshold for tail fit to be considered successful
-min_sep			0										#Minimal SN - host nucleus separation in arcsec
-min_successes		4										#Minimal nr. of successful attempts needed per object for late-time detection to be considered significant
-save_lc_and_bins	True										#Save uncorrected lc, baseline corrected lc (points used in the binning program), and bins
+mode			real_time											#Input type (currently works with 'ZTFDR2', 'simulations', 'fpbot', 'real_time', 'pre-ZTF')
+refmags_loc		/home/users/terwelj/Late-time_interactions/real-time_version/obs_files/ref_im_data.csv		#Location of the reference file magnitudes
+zp_rcid_loc		/home/users/terwelj/Late-time_interactions/real-time_version/obs_files/zp_thresholds_quadID.txt	#Location of the file with the zeropoints for each rcid
+loc_list_loc		/home/users/terwelj/Late-time_interactions/real-time_version/obs_files/SN_host_locs.csv		#Location of the file with the host galaxy locations
+dat_list_loc		/home/users/terwelj/Late-time_interactions/real-time_version/obs_files/SN_host_data.csv		#Lcoation of the file with the rest of the host galaxy data
+fields_list_loc		/home/users/terwelj/Late-time_interactions/real-time_version/obs_files/ZTF_Fields.txt		#Location of the file with the field pointings
+late_time		100												#Nr. of days after found peak to start binning at
+cuts			[1,2,4,8,64]											#If any of these flags are raised, remove data point (hardcoded for fpbot & simulations)
+base_gap		40												#Gap between end of baseline and found peak mjd in days
+binsizes		[100,75,50,25]											#Size in days of used bins
+phases			[0.0,0.25,0.5,0.75]										#Offsets of bins used for each binsize in fraction of size
+method			4												#Method of calculating next bin position
+earliest_tail_fit_start	60												#Earliest time in days after peak mjd to use unbinned data in the tail fits
+verdict_sigma		5												#sigma = flux/flux_err treshold for bin to be considered a detection
+tail_fit_chi2dof_tresh	5												#Treshold for tail fit to be considered successful
+min_sep			0												#Minimal SN - host nucleus separation in arcsec
+min_successes		4												#Minimal nr. of successful attempts needed per object for late-time detection to be considered significant
+save_lc_and_bins	False												#Save anything other than the verdicts and final verdicts (e.g. (un)corrected lc, tail fits, and bins)
+note_missing_host	False												#Print to screen when an object has no associated host in the given file
+baselines_loc		baselines.csv											#Which observations should be used for a baseline detection? (only in pre-ZTF mode)
+max_cpu			None												#Maximum number of cpus to use for multiprocessing, None is all available cpus
